@@ -1,0 +1,10 @@
+order = 1
+what = "Auto-detect project team from marker files"
+file = "src/role/team_detector.rs"
+why = "Enables automatic team selection without explicit CLI flags"
+how = "Check for marker files in priority order (Cargo.toml → rust, Gemfile → ruby, package.json → node). Support glob patterns via the glob crate. Return detected team name or None. Handle --team CLI override taking precedence."
+
+[context]
+inputs = "Working directory path, optional CLI override string"
+outputs = "pub fn detect_team(dir: &Path, cli_override: Option<&str>) -> Result<String>; pub struct TeamDetector with configurable marker patterns"
+tests = "Unit tests with temp directories containing various marker files; test priority ordering; test CLI override; test glob patterns; test no-match warning"

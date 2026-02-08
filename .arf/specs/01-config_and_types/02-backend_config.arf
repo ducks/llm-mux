@@ -1,0 +1,10 @@
+order = 2
+what = "Backend configuration structs for LLM provider definitions"
+file = "src/config/backend_config.rs"
+why = "Backends are the atomic units that execute prompts; need dedicated config"
+how = "Define BackendConfig with fields: command (String), args (Vec<String>), timeout_secs (Option<u64>), max_retries (Option<u32>), retry_delay_ms (Option<u64>), env (Option<HashMap<String, String>>). Use #[serde(deny_unknown_fields)] for validation. Implement Default trait with sensible defaults (30s timeout, 3 retries)."
+
+[context]
+inputs = "Raw TOML data via serde deserialization"
+outputs = "BackendConfig struct with serde Deserialize"
+tests = "Deserialization tests, unknown field rejection, default values"

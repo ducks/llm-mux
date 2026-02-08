@@ -1,0 +1,10 @@
+order = 2
+what = "Apply parsed edits to files with fuzzy matching and backup creation"
+file = "src/apply_and_verify/diff_applier.rs"
+why = "Core functionality to modify files based on LLM-generated edits"
+how = "For unified diffs: find hunk context lines with ±3 line drift tolerance, normalize whitespace for matching. For old/new: exact match with whitespace normalization. For full file: simple overwrite. Create backups in .llmux/backups/ before any modification. Track all modified files for potential rollback."
+
+[context]
+inputs = "Vec<EditOperation> from edit_parser, backup directory path"
+outputs = "Result with list of modified files and their backup paths, or error with context"
+tests = "Apply clean diffs, test fuzzy matching with line drift, verify backups created, test failure on no-match."

@@ -1,0 +1,10 @@
+order = 2
+what = "Workflow file discovery and TOML parsing"
+file = "src/workflow_engine/loader.rs"
+why = "Encapsulate resolution order logic and parsing into a single module"
+how = "Implement load_workflow(name) that checks .llmux/workflows/{name}.toml, then ~/.config/llmux/workflows/, then embedded built-ins. Use toml crate to deserialize into Workflow struct. Return descriptive errors for missing files or parse failures."
+
+[context]
+inputs = "Workflow name string, optional base path override for testing"
+outputs = "pub fn load_workflow(name: &str) -> Result<Workflow>, pub fn list_workflows() -> Vec<String>"
+tests = "Test resolution order with temp directories, test TOML parse errors, test built-in fallback"

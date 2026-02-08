@@ -1,0 +1,10 @@
+order = 5
+what = "Orchestrate apply-verify-rollback-retry cycle with error context"
+file = "src/apply_and_verify/retry_loop.rs"
+why = "Ties all pieces together and handles the iterative fix loop when verification fails"
+how = "Main apply_and_verify function: 1) Resolve source step output, 2) Parse edits, 3) Apply with backup, 4) Run verification. On failure: rollback, construct retry prompt with error output, re-query source role, repeat up to verify_retries times. Wrap entire cycle in timeout. Return final result with attempt history."
+
+[context]
+inputs = "Step config (source, verify, verify_retries, rollback_strategy), workflow context for re-querying"
+outputs = "ApplyVerifyResult with success, final output, attempt history, total duration"
+tests = "Test successful first try, test retry on failure, test max retries exceeded, test timeout."

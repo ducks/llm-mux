@@ -1,0 +1,10 @@
+order = 3
+what = "Custom template filters"
+file = "src/template/filters.rs"
+why = "Architecture requires join, shell_escape, json, first, last filters"
+how = "Implement each filter as fn(Value, args) -> Result<Value>. join(sep) joins arrays. shell_escape quotes for safe shell interpolation. json serializes to JSON string. first/last return array head/tail. Register all with Environment::add_filter."
+
+[context]
+inputs = "Filter arguments from template syntax"
+outputs = "Filter functions, register_filters(env: &mut Environment) helper"
+tests = "Test each filter with edge cases - empty arrays, special characters in shell_escape, nested objects in json"

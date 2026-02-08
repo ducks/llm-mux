@@ -1,0 +1,10 @@
+order = 5
+what = "Template error types with suggestions"
+file = "src/template/errors.rs"
+why = "Architecture calls for TemplateError with source location and typo suggestions"
+how = "Define TemplateError enum with variants: UndefinedVariable, SyntaxError, FilterError, TypeMismatch. Include source_location (line/col), variable name, and suggestion field. Implement did_you_mean using Levenshtein distance against known variable names."
+
+[context]
+inputs = "Error details from minijinja, list of valid variable names for suggestions"
+outputs = "TemplateError enum, impl Display, From<minijinja::Error>, suggest_correction() helper"
+tests = "Verify suggestions for common typos (anaylze -> analyze), source locations captured"

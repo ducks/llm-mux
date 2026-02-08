@@ -1,0 +1,10 @@
+order = 4
+what = "Workflow and step configuration structs"
+file = "src/config/workflow_config.rs"
+why = "Workflows are the user-facing abstraction; steps define execution sequence"
+how = "Define WorkflowConfig: name, description, version (Option<String>), args (Vec<ArgDef>), steps (Vec<StepConfig>). Define ArgDef: name, description, required, default. Define StepConfig: name, role (Option), backends (Option), prompt (Option), shell (Option), for_each (Option), apply_edits, verify (Option), fix_retries (Option), depends_on (Vec). Validate mutual exclusivity (prompt XOR shell)."
+
+[context]
+inputs = "Raw TOML workflow files"
+outputs = "WorkflowConfig, StepConfig, ArgDef structs"
+tests = "Parse complete workflows, validate step constraints, arg substitution"

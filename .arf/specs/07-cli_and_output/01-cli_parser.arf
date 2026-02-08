@@ -1,0 +1,10 @@
+order = 1
+what = "CLI argument parsing with clap"
+file = "src/cli/parser.rs"
+why = "Central entry point that defines all commands and flags"
+how = "Use clap derive macros to define Cli struct with subcommands (Run, Validate, Doctor, Backends, Teams, Workflows, Context). Each subcommand has its own struct with args. Global flags (--team, --context, --output, --debug, --quiet) on parent. Run command takes workflow name and variadic args."
+
+[context]
+inputs = "Command line arguments from main()"
+outputs = "Parsed Cli enum with typed command and options"
+tests = "Unit tests for arg parsing edge cases, help text generation"

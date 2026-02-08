@@ -1,0 +1,28 @@
+[package]
+name = "llmux"
+version = "0.1.0"
+edition = "2024"
+description = "Multiplexer for LLMs - route prompts to multiple backends"
+license = "MIT"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0"
+
+[dev-dependencies]
+tempfile = "3.0"

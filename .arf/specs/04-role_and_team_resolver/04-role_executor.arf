@@ -1,0 +1,10 @@
+order = 4
+what = "Execute backend calls according to execution mode"
+file = "src/role/role_executor.rs"
+why = "Orchestrates parallel/sequential backend execution with proper async handling"
+how = "Use tokio::JoinSet for parallel execution. For First: return on first success. For Fallback: try sequentially until success. For Parallel: run all concurrently, wait for min_success completions. Optional cancellation of remaining tasks on early success."
+
+[context]
+inputs = "List of backends, execution mode, query context, backend runner function"
+outputs = "pub async fn execute_role(backends: Vec<String>, mode: ExecutionMode, ctx: &QueryContext, runner: impl BackendRunner) -> Result<RoleResult>"
+tests = "Integration tests with mock backends; test parallel timing; test fallback order; test cancellation behavior; test min_success waiting"

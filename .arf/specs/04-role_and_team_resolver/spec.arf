@@ -1,0 +1,11 @@
+order = 4
+what = "Resolve roles to backends, team auto-detection, execution modes (parallel/fallback/first)"
+why = "Roles are the abstraction layer users write workflows against; needs backend_executor to run things, config for team definitions"
+how = "1. TeamDetector:\n   - Check marker files in order: Cargo.toml → rust, Gemfile → ruby, package.json → node\n   - Support glob patterns in detect field\n   - Allow --team CLI override\n   - Warn if auto-detect fails and no override\n\n2. RoleResolver:\n   - Given role name + team, return list of backends\n   - Resolution order: team.roles.X → roles.X.backends → error\n   - Validate backends exist in config\n\n3. RoleExecutor orchestrating backend calls:\n   - First: try backends in order, return first success\n   - Parallel: run all concurrently, collect results\n   - Fallback: try each until one succeeds, return that\n\n4. Parallel execution:\n   - tokio::join! or JoinSet for concurrent backend calls\n   - min_success parameter: wait for N successes before returning\n   - Cancellation: cancel remaining on success (optional) vs run to completion\n\n5. Result aggregation:\n   - For First/Fallback: single StepResult with .output\n   - For Parallel: StepResult with .outputs array and .outputs.{backend} map\n   - Track which backends ran, succeeded, failed\n"
+backup = "Start with First mode only; add Parallel when workflow_engine needs it"
+
+[context]
+inputs = "Role name, team config (or auto-detected), execution mode, prompt"
+outputs = "StepResult with output(s), timing, backend info, per-backend status"
+dependencies = ["config_and_types", "backend_executor"]
+tests = "1. Unit tests for team detection: find Cargo.toml → rust team\n2. Test role resolution: team overrides default, missing role errors\n3. Test First mode: returns first success, skips on failure\n4. Test Parallel mode: all backends run, results aggregated\n5. Test Fallback mode: tries in order until success\n6. Test min_success: returns early when threshold met\n7. Test with mock backends: simulate success/failure combinations\n"

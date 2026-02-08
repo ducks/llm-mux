@@ -1,0 +1,10 @@
+order = 3
+what = "Role and team configuration structs"
+file = "src/config/role_team_config.rs"
+why = "Roles define behavior profiles, teams group backends with detection logic"
+how = "Define RoleConfig: description (String), backends (Vec<String>), execution (RoleExecution enum). Define RoleExecution enum: First, Parallel, Fallback. Define TeamConfig: description (String), detect_patterns (Vec<String>), verify_command (Option<String>), roles (HashMap<String, RoleOverride>). RoleOverride allows per-team backend lists. Use deny_unknown_fields."
+
+[context]
+inputs = "Raw TOML data, depends on RoleExecution enum"
+outputs = "RoleConfig, TeamConfig, RoleExecution enum"
+tests = "Parse valid configs, reject unknown fields, role override merging"

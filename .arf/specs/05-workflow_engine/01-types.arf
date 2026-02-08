@@ -1,0 +1,10 @@
+order = 1
+what = "Core workflow data structures and enums"
+file = "src/workflow_engine/types.rs"
+why = "Define the foundational types that all other workflow modules depend on"
+how = "Define Workflow, Step, StepType, StepResult, StepStatus, Group, WorkflowConfig structs. Include serialization derives for TOML parsing. StepResult holds output, status, duration. StepStatus enum: Pending, Running, Completed, Failed, Skipped."
+
+[context]
+inputs = "None - this is the base types module"
+outputs = "Workflow, Step, StepType, StepResult, StepStatus, Group, WorkflowConfig, ValidationError"
+tests = "Unit tests for Default impls, serialization round-trips"

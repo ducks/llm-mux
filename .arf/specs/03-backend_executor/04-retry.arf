@@ -1,0 +1,10 @@
+order = 4
+what = "Retry logic with exponential backoff and error classification"
+file = "src/backend_executor/retry.rs"
+why = "Transient failures (rate limits, timeouts, network) should retry; permanent failures should not"
+how = "RetryExecutor wrapper that classifies errors as retryable or permanent, implements exponential backoff with jitter, respects max_retries and initial_delay from config, captures partial output on timeout"
+
+[context]
+inputs = "Inner BackendExecutor, RetryPolicy config"
+outputs = "RetryExecutor<T: BackendExecutor> implementing BackendExecutor"
+tests = "Test retry on 429/timeout, no retry on 401, backoff timing, max retries respected"

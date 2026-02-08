@@ -1,0 +1,10 @@
+order = 5
+what = "Multi-layer config loading with merge logic"
+file = "src/config/loader.rs"
+why = "Need to merge built-in defaults, user config, and project config in order"
+how = "Define LlmuxConfig as top-level: backends (HashMap), roles (HashMap), teams (HashMap). Implement load() that reads: 1) embedded defaults, 2) ~/.config/llmux/config.toml, 3) .llmux/config.toml. Merge strategy: maps merge (later wins), arrays replace. Return merged LlmuxConfig. Handle missing files gracefully. Define StepResult struct here: output, outputs (for parallel), failed, error, duration_ms, backend."
+
+[context]
+inputs = "File paths, environment for home dir detection"
+outputs = "LlmuxConfig struct, load() function, StepResult struct"
+tests = "Layer precedence tests, merge behavior, missing file handling"

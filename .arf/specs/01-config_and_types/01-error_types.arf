@@ -1,0 +1,10 @@
+order = 1
+what = "Error types and error kind enum for the entire system"
+file = "src/config/error_types.rs"
+why = "Foundation type needed by all other modules for consistent error handling"
+how = "Define ErrorKind enum (RateLimit, Timeout, NetworkError, ConfigError, ParseError, BackendError, ValidationError). Define StepError struct with fields: kind, message, step_name, backend, attempt, duration_ms, stdout, stderr, prompt. Implement std::error::Error and Display traits."
+
+[context]
+inputs = "None - this is a leaf module"
+outputs = "ErrorKind enum, StepError struct, Result type alias"
+tests = "Unit tests for Display formatting, error context preservation"

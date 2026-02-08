@@ -1,0 +1,10 @@
+order = 1
+what = "TOML schemas and core types for backends, roles, teams, and workflows"
+why = "Foundation layer everything else builds on; defines the data structures that backends, roles, teams, and workflows use throughout the system"
+how = "1. Define config structs with serde Deserialize:\n   - BackendConfig: command, args, timeout, retry settings\n   - RoleConfig: description, default backends list\n   - TeamConfig: description, detect patterns, verify command, role overrides\n   - WorkflowConfig: name, description, version, args, steps\n\n2. Implement multi-layer config hierarchy:\n   - Load order: built-in defaults → ~/.config/llmux/config.toml → .llmux/config.toml\n   - Use config-rs or manual TOML parsing with merge logic\n   - Later configs override earlier; arrays replace, maps merge\n\n3. Core types for runtime:\n   - StepResult: output/outputs, failed, error, duration_ms, backend(s)\n   - ErrorKind enum: RateLimit, Timeout, NetworkError, ConfigError, etc.\n   - StepError struct with full context (timing, prompt, stdout/stderr, attempt)\n   - RoleExecution enum: First, Parallel, Fallback\n\n4. Validation with #[serde(deny_unknown_fields)] to catch typos early\n"
+backup = "Start with minimal types (Backend, Step, Workflow only), add roles/teams in role_and_team_resolver"
+
+[context]
+inputs = "TOML files from filesystem (project, user, built-in), CLI args for overrides"
+outputs = "Validated Config struct, typed backend/role/team/workflow definitions"
+tests = "1. Unit tests for config loading: valid TOML parses, invalid TOML errors with helpful messages\n2. Test config merging: project overrides user, user overrides defaults\n3. Test unknown field rejection: extra fields cause parse errors\n4. Integration test: load real config hierarchy from temp directories\n5. Property tests: roundtrip serialization preserves values\n"

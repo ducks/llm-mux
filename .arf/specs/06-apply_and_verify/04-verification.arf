@@ -1,0 +1,10 @@
+order = 4
+what = "Run verify commands and capture results for pass/fail determination"
+file = "src/apply_and_verify/verification.rs"
+why = "Need to validate that applied edits produce working code"
+how = "Parse verify command string, run via tokio::process::Command. Capture exit code, stdout, stderr. Apply timeout from step config. Return structured VerifyResult with success bool, output streams, elapsed time. Use shell_escape for any interpolated values."
+
+[context]
+inputs = "Verify command string, timeout duration, working directory"
+outputs = "VerifyResult with success, exit_code, stdout, stderr, duration"
+tests = "Test successful command, failing command, timeout handling, output capture."

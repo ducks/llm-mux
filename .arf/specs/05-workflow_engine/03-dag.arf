@@ -1,0 +1,10 @@
+order = 3
+what = "Dependency graph construction and cycle detection"
+file = "src/workflow_engine/dag.rs"
+why = "Separate graph logic from execution for clarity and testability"
+how = "Build adjacency list from depends_on fields. Implement Kahn's algorithm for topological sort with cycle detection. Group independent steps into parallel batches. Return ExecutionPlan with ordered batches."
+
+[context]
+inputs = "Workflow struct with steps and their depends_on fields"
+outputs = "pub fn build_execution_plan(workflow: &Workflow) -> Result<ExecutionPlan>, ExecutionPlan struct with Vec<Vec<StepRef>>"
+tests = "Test linear deps, parallel groups, cycle detection error, missing dep error"

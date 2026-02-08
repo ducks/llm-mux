@@ -1,0 +1,10 @@
+order = 3
+what = "Restore files to pre-edit state via git or backup files"
+file = "src/apply_and_verify/rollback.rs"
+why = "Must undo changes when verification fails before retry or final failure"
+how = "RollbackStrategy enum: Git (git checkout -- files), Backup (restore from .llmux/backups/), None. Git strategy: run git checkout for each modified file. Backup strategy: copy backup files back to original paths. Clean up backup files after successful restore."
+
+[context]
+inputs = "List of modified files with backup paths, rollback strategy from config"
+outputs = "Result indicating success or partial failure with details"
+tests = "Test git rollback, backup restore, verify original content restored, test partial failure handling."

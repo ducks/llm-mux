@@ -1,0 +1,10 @@
+order = 1
+what = "Parse edit formats from LLM output (unified diff, old/new pairs, full file)"
+file = "src/apply_and_verify/edit_parser.rs"
+why = "Need to extract structured edits from various LLM response formats before applying"
+how = "Define EditOperation enum (UnifiedDiff, OldNewPair, FullFile). Parse unified diff @@ hunks with regex. Parse old/new JSON pairs. Detect format automatically from content structure. Validate parsed edits have required fields."
+
+[context]
+inputs = "Raw string output from LLM step, source step name for error context"
+outputs = "Vec<EditOperation> with file path, change type, and content for each edit"
+tests = "Parse sample unified diffs, old/new JSON, full file replacements. Test malformed input handling."

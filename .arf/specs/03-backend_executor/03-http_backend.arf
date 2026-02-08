@@ -1,0 +1,10 @@
+order = 3
+what = "Execute HTTP API-based LLM backends"
+file = "src/backend_executor/http_backend.rs"
+why = "OpenAI-compatible APIs (and others) use HTTP endpoints"
+how = "Implement BackendExecutor for HttpBackend using reqwest, handle streaming responses for progress callbacks, parse JSON response bodies, support auth headers and base URL configuration"
+
+[context]
+inputs = "API endpoint, auth token, model ID, request parameters"
+outputs = "HttpBackend struct implementing BackendExecutor"
+tests = "Mock HTTP responses with wiremock, test streaming, auth header injection"

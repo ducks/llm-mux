@@ -1,0 +1,10 @@
+order = 1
+what = "Core types and traits for backend execution"
+file = "src/backend_executor/types.rs"
+why = "Defines the BackendExecutor trait and BackendResponse struct that all implementations share"
+how = "Define BackendExecutor trait with async execute method, BackendResponse struct with text/structured output/metadata, BackendError enum for categorized errors (Timeout, RateLimit, Auth, Network, Parse)"
+
+[context]
+inputs = "Prompt string, context file paths, backend configuration"
+outputs = "BackendExecutor trait, BackendResponse, BackendError, RetryPolicy struct"
+tests = "Unit tests for error categorization, BackendResponse construction"

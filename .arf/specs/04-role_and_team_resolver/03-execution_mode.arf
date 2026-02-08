@@ -1,0 +1,10 @@
+order = 3
+what = "Define execution mode types and result aggregation"
+file = "src/role/execution_mode.rs"
+why = "Type-safe representation of how multi-backend calls should execute"
+how = "Define ExecutionMode enum (First, Parallel { min_success }, Fallback). Define RoleResult struct containing outputs map, success list, failure list. Implement aggregation logic for each mode."
+
+[context]
+inputs = "Individual backend results"
+outputs = "pub enum ExecutionMode; pub struct RoleResult with outputs: HashMap<String, String>, succeeded: Vec<String>, failed: Vec<String>"
+tests = "Test result aggregation for each mode; test min_success threshold logic"

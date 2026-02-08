@@ -1,0 +1,10 @@
+order = 2
+what = "Output handlers for console, JSON, and logging"
+file = "src/cli/output.rs"
+why = "Abstracts output formatting so commands can emit results without knowing display format"
+how = "OutputHandler trait with methods: step_start, step_complete, step_error, parallel_progress, final_result. ConsoleHandler uses colored + indicatif for pretty output. JsonHandler serializes events to stdout. LogHandler writes to .llmux/logs/ with timestamps. OutputMode enum selected by --output flag."
+
+[context]
+inputs = "Step events, results, errors from command execution"
+outputs = "Formatted output to appropriate destination (terminal, stdout, file)"
+tests = "Mock handler to capture events, verify JSON structure, test color stripping in non-TTY"

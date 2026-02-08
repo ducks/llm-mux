@@ -1,0 +1,11 @@
+order = 3
+what = "Execute LLM backends (CLI/API) with retry, timeout, and output parsing"
+why = "Core capability needed before role resolution; handles provider-specific quirks in one place"
+how = "1. BackendExecutor trait:\n   - async fn execute(prompt: &str, context: &[PathBuf]) -> Result<BackendResponse>\n   - Implementations: CliBackend, HttpBackend\n\n2. CliBackend:\n   - Spawn process with tokio::process::Command\n   - Stream stdout/stderr via async channels\n   - Handle exit codes (0 = success, non-zero = error)\n   - Parse JSON output if backend outputs structured data (codex --json)\n\n3. HttpBackend:\n   - reqwest for HTTP calls to OpenAI-compatible APIs\n   - Handle streaming responses for progress\n   - Parse JSON response, extract text/structured output\n\n4. Timeout handling:\n   - Per-backend timeout config\n   - tokio::time::timeout wrapper around execute\n   - Capture partial output on timeout for debugging\n\n5. Retry logic (Layer 1 - automatic backend retries):\n   - Retry on: rate limit (429), timeout, network error\n   - Don't retry on: auth error (401/403), bad request (400)\n   - Exponential backoff with jitter\n   - Max retries from backend config\n\n6. Output parsing:\n   - Extract JSON from markdown code blocks (```json ... ```)\n   - Validate against output_schema if provided\n   - Preserve raw response for debugging\n"
+backup = "CLI-only executor first, add HTTP support later; skip output schema validation initially"
+
+[context]
+inputs = "Prompt string, optional context files, BackendConfig, output_schema (optional)"
+outputs = "BackendResponse: text output, parsed JSON (if schema), timing, backend name"
+dependencies = ["config_and_types"]
+tests = "1. Unit tests with mock CLI: verify command construction, arg escaping\n2. Test timeout behavior: command times out, partial output captured\n3. Test retry logic: transient errors retried, permanent errors fail immediately\n4. Test output parsing: extract JSON from markdown, validate schema\n5. Integration test: real backend call (can be skipped in CI)\n6. Test exit code handling: 0 success, non-zero error with stderr\n"

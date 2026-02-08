@@ -1,0 +1,10 @@
+order = 4
+what = "Step execution logic for shell, query, and apply types"
+file = "src/workflow_engine/executor.rs"
+why = "Core runtime that actually executes steps based on their type"
+how = "Match on StepType: shell runs via tokio::process::Command, query delegates to role_and_team_resolver, apply delegates to apply_and_verify. Handle conditionals by evaluating if expression via template_engine before running. Implement for_each by evaluating expression to array and running step per item with item in context."
+
+[context]
+inputs = "Step, WorkflowState (context), references to template_engine and other components"
+outputs = "pub async fn execute_step(step: &Step, state: &mut WorkflowState, ctx: &ExecutionContext) -> Result<StepResult>"
+tests = "Test shell command execution, test conditional skip, test for_each iteration, mock query/apply"

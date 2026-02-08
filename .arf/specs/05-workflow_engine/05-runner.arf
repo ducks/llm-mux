@@ -1,0 +1,10 @@
+order = 5
+what = "Orchestrates full workflow execution with state management"
+file = "src/workflow_engine/runner.rs"
+why = "Top-level coordinator that ties together DAG planning and step execution"
+how = "Load workflow via loader, build plan via dag, iterate batches. For each batch, spawn parallel tasks via tokio::join_all. Track results in HashMap<String, StepResult>. Handle continue_on_error at step and workflow level. Expose validate() function that checks deps, roles, templates, cycles without running."
+
+[context]
+inputs = "Workflow name, runtime arguments, component dependencies (template_engine, role_resolver, etc.)"
+outputs = "pub async fn run_workflow(name: &str, args: Args) -> Result<WorkflowResult>, pub fn validate_workflow(workflow: &Workflow) -> Vec<ValidationError>"
+tests = "Integration test with simple workflow, test error propagation, test continue_on_error, test validate catches issues"

@@ -1,0 +1,10 @@
+order = 5
+what = "Parse and validate backend output"
+file = "src/backend_executor/output_parser.rs"
+why = "Extract structured data from raw LLM responses, validate against schemas"
+how = "Extract JSON from markdown code blocks (```json...```), support multiple extraction patterns, validate against JSON schema if output_schema provided, preserve raw response alongside parsed"
+
+[context]
+inputs = "Raw response text, optional JSON schema"
+outputs = "parse_output() function returning ParsedOutput with raw/structured fields"
+tests = "Test JSON extraction from various markdown formats, schema validation pass/fail"

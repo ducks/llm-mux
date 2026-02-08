@@ -1,0 +1,10 @@
+order = 3
+what = "Implementation of each CLI command"
+file = "src/cli/commands.rs"
+why = "Separates command logic from parsing and output concerns"
+how = "Functions for each command: run_workflow (load, detect team, execute, display), validate_workflow (parse and check), doctor (check backends, team detection, deps), list_backends, list_teams, list_workflows, gather_context. Each takes parsed args + output handler. Run command integrates with workflow_engine."
+
+[context]
+inputs = "Parsed command args from cli_parser, OutputHandler instance"
+outputs = "Exit code, side effects via output handler"
+tests = "Integration tests with mock workflow engine, verify doctor output format"

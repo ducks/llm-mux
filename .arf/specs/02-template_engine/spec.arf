@@ -1,0 +1,11 @@
+order = 2
+what = "Tera/minijinja rendering for prompts, conditionals, and step output access"
+why = "Used everywhere (prompts, `if =` conditions, `for_each`, output field access); separate module prevents circular deps with workflow engine"
+how = "1. Choose minijinja (Rust-native, fast, Jinja2 compatible) or Tera (more features)\n\n2. Create template context builder:\n   - steps: HashMap<String, StepResult> - access via steps.name.output, steps.name.outputs\n   - args: HashMap<String, String> - CLI arguments\n   - team: TeamConfig - team.verify, team.roles\n   - env: lazy ENV access\n   - item: current element in for_each iteration\n\n3. Expression evaluation for conditionals:\n   - Parse `if = \"steps.fix.action == 'fix'\"` as simple expression\n   - Evaluate against template context\n   - Support: ==, !=, and, or, not, string/bool literals\n\n4. Custom filters:\n   - `join(sep)`: join array with separator\n   - `shell_escape`: escape string for shell interpolation\n   - `json`: serialize to JSON string\n   - `first`, `last`: array accessors\n\n5. Error handling:\n   - TemplateError with source location, invalid variable reference\n   - Suggest corrections for typos (steps.anaylze → steps.analyze)\n"
+backup = "Simple string replacement ({{ var }}) without conditionals; add full templating later"
+
+[context]
+inputs = "Template strings (prompts, commands), context (steps, args, team), expressions (if conditions)"
+outputs = "Rendered strings, evaluated boolean expressions"
+dependencies = ["config_and_types"]
+tests = "1. Unit tests for variable substitution: {{ steps.X.output }}, {{ args.issue }}\n2. Test nested field access: {{ steps.analyze.outputs.claude }}, {{ steps.X.error.stderr }}\n3. Test filters: join, shell_escape, json serialization\n4. Test expression evaluation: equality, boolean operators\n5. Test error cases: undefined variable, invalid syntax, type mismatch\n6. Test for_each: {{ item }} substitution with arrays\n"

@@ -1,0 +1,10 @@
+order = 4
+what = "Signal handling for graceful shutdown"
+file = "src/cli/signals.rs"
+why = "Allows Ctrl+C to cleanly cancel running backends instead of hard kill"
+how = "Use ctrlc crate or tokio::signal. Register handler that sets AtomicBool flag. Commands check flag between steps. Provide CancellationToken that backends respect. On cancel: log partial state, attempt graceful backend termination, exit with appropriate code."
+
+[context]
+inputs = "OS signals (SIGINT, SIGTERM)"
+outputs = "CancellationToken for async cancellation, shutdown coordination"
+tests = "Test cancellation propagation, verify cleanup runs on signal"

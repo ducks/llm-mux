@@ -1,0 +1,10 @@
+order = 5
+what = "Module root exposing public API"
+file = "src/role/mod.rs"
+why = "Clean public interface for the role subsystem"
+how = "Re-export TeamDetector, RoleResolver, ExecutionMode, RoleResult, execute_role. Keep internal implementation details private."
+
+[context]
+inputs = "Submodule declarations"
+outputs = "pub use team_detector::*; pub use role_resolver::*; pub use execution_mode::*; pub use role_executor::*"
+tests = "Compile test verifying public API surface"

@@ -1,0 +1,10 @@
+order = 4
+what = "Expression evaluation for step conditionals"
+file = "src/template/conditionals.rs"
+why = "Steps have if = \"steps.fix.action == 'fix'\" requiring simple expression parsing"
+how = "Parse expressions with ==, !=, and, or, not operators. Support string/bool literals and dot-path variable access. Use minijinja's expression evaluation or a small custom parser. Return bool result."
+
+[context]
+inputs = "Expression string, TemplateContext for variable resolution"
+outputs = "evaluate_condition(expr: &str, ctx: &TemplateContext) -> Result<bool, TemplateError>"
+tests = "Test equality, boolean logic, nested paths, type mismatches"

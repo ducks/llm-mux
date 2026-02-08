@@ -1,0 +1,51 @@
+what = "Implement llmux based on ARCHITECTURE.md. Focus on the core workflow engine and role/team system first."
+why = "Structured implementation plan with dependency ordering"
+
+[[steps]]
+order = 1
+spec = "config_and_types"
+dir = "01-config_and_types"
+summary = "TOML schemas and core types for backends, roles, teams, and workflows"
+
+[[steps]]
+order = 2
+spec = "template_engine"
+dir = "02-template_engine"
+summary = "Tera/minijinja rendering for prompts, conditionals, and step output access"
+depends_on = ["config_and_types"]
+
+[[steps]]
+order = 3
+spec = "backend_executor"
+dir = "03-backend_executor"
+summary = "Execute LLM backends (CLI/API) with retry, timeout, and output parsing"
+depends_on = ["config_and_types"]
+
+[[steps]]
+order = 4
+spec = "role_and_team_resolver"
+dir = "04-role_and_team_resolver"
+summary = "Resolve roles to backends, team auto-detection, execution modes (parallel/fallback/first)"
+depends_on = ["config_and_types", "backend_executor"]
+
+[[steps]]
+order = 5
+spec = "workflow_engine"
+dir = "05-workflow_engine"
+summary = "DAG execution, step sequencing, parallel groups, conditionals, for_each, validation"
+depends_on = ["template_engine", "role_and_team_resolver"]
+
+[[steps]]
+order = 6
+spec = "apply_and_verify"
+dir = "06-apply_and_verify"
+summary = "File edits (unified diff preferred), verification commands, retry loops with error context"
+depends_on = ["workflow_engine"]
+
+[[steps]]
+order = 7
+spec = "cli_and_output"
+dir = "07-cli_and_output"
+summary = "CLI commands (run/validate/doctor), output handlers (console/json), progress display"
+depends_on = ["workflow_engine", "apply_and_verify"]
+

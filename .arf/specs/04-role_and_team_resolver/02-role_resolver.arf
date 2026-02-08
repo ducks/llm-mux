@@ -1,0 +1,10 @@
+order = 2
+what = "Resolve role names to backend lists using team context"
+file = "src/role/role_resolver.rs"
+why = "Maps abstract roles (writer, reviewer) to concrete backends per team"
+how = "Given role name + team, look up backends in order: team.roles.X → roles.X.backends. Validate all resolved backends exist in config. Return error if role undefined or backends missing."
+
+[context]
+inputs = "Role name, team name, parsed Config reference"
+outputs = "pub fn resolve_role(role: &str, team: &str, config: &Config) -> Result<Vec<String>>; pub struct RoleResolver"
+tests = "Test team-specific override; test fallback to global roles; test missing role error; test invalid backend error"

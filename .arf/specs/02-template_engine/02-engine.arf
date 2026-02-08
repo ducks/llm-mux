@@ -1,0 +1,10 @@
+order = 2
+what = "Minijinja environment setup and rendering"
+file = "src/template/engine.rs"
+why = "Central rendering API that other modules call"
+how = "Create TemplateEngine struct wrapping minijinja::Environment. Configure strict undefined handling, register custom filters. Expose render(template_str, context) -> Result<String, TemplateError>. Handle template compilation and caching."
+
+[context]
+inputs = "Template string, TemplateContext"
+outputs = "TemplateEngine struct, render() method returning Result<String, TemplateError>"
+tests = "Render basic templates, verify variable substitution, test undefined variable errors"

@@ -1,0 +1,10 @@
+order = 2
+what = "Execute CLI-based LLM backends via subprocess"
+file = "src/backend_executor/cli_backend.rs"
+why = "Many backends (codex, claude-code, gemini-cli) are invoked as CLI tools"
+how = "Implement BackendExecutor for CliBackend using tokio::process::Command, stream stdout/stderr via async channels, map exit codes to success/error, handle --json flag for structured output"
+
+[context]
+inputs = "Command template, arguments, environment vars, working directory"
+outputs = "CliBackend struct implementing BackendExecutor"
+tests = "Mock subprocess execution, test streaming output capture, exit code handling"

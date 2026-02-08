@@ -1,0 +1,10 @@
+order = 1
+what = "Template context builder"
+file = "src/template/context.rs"
+why = "Provides data structures that templates access - steps, args, team, env, item"
+how = "Define TemplateContext struct with fields for steps (HashMap<String, StepResult>), args (HashMap<String, String>), team (TeamConfig), env (lazy accessor), and item (Option<Value> for for_each). Implement From/Into for minijinja Object trait."
+
+[context]
+inputs = "StepResult map, CLI args, TeamConfig, current for_each item"
+outputs = "TemplateContext struct, IntoObject impl for minijinja"
+tests = "Unit tests for context building, verify all fields accessible via dot notation"
