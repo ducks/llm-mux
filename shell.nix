@@ -9,9 +9,19 @@ pkgs.mkShell {
     rustfmt
     pkg-config
     openssl
+
+    # For LLM CLI backends
+    pkgs.nodejs_22
+    pkgs.nodePackages.npm
   ];
 
   shellHook = ''
+    export RUST_BACKTRACE=1
+    export NPM_CONFIG_PREFIX=$HOME/.npm-global
+    export PATH=$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$PATH
+    export LD_LIBRARY_PATH=${pkgs.openssl.out}/lib:$LD_LIBRARY_PATH
+
+    echo ""
     echo "llmux dev shell"
     echo "  rustc: $(rustc --version)"
     echo "  cargo: $(cargo --version)"
