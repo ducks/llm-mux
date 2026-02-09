@@ -127,19 +127,33 @@ impl BackendExecutor for CliBackend {
 
         // Read output with timeout
         let result = tokio::time::timeout(timeout, async {
+            let mut stderr_done = false;
             loop {
                 tokio::select! {
+                    biased;
                     line = stdout_reader.next_line() => {
                         match line {
-                            Ok(Some(l)) => stdout_lines.push(l),
-                            Ok(None) => break,
+                            Ok(Some(l)) => {
+                                eprintln!("[DEBUG {}] stdout: {}", self.name, l.chars().take(50).collect::<String>());
+                                stdout_lines.push(l);
+                            }
+                            Ok(None) => {
+                                eprintln!("[DEBUG {}] stdout EOF", self.name);
+                                break;
+                            }
                             Err(e) => return Err(BackendError::parse(format!("stdout read error: {}", e))),
                         }
                     }
-                    line = stderr_reader.next_line() => {
+                    line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
-                            Ok(Some(l)) => stderr_lines.push(l),
-                            Ok(None) => {},
+                            Ok(Some(l)) => {
+                                eprintln!("[DEBUG {}] stderr: {}", self.name, l.chars().take(50).collect::<String>());
+                                stderr_lines.push(l);
+                            }
+                            Ok(None) => {
+                                eprintln!("[DEBUG {}] stderr EOF", self.name);
+                                stderr_done = true;
+                            }
                             Err(e) => return Err(BackendError::parse(format!("stderr read error: {}", e))),
                         }
                     }
