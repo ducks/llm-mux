@@ -49,14 +49,14 @@ pub fn parse_output(text: &str, schema: Option<&OutputSchema>) -> ParsedOutput {
 
     // Try to extract JSON
     if let Some(json) = extract_json(text) {
-        output.json = Some(json.clone());
-
         // Validate against schema if provided
         if let Some(schema) = schema {
             let errors = validate_schema(&json, schema);
             output.schema_valid = Some(errors.is_empty());
             output.schema_errors = errors;
         }
+
+        output.json = Some(json);
     }
 
     output
