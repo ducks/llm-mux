@@ -34,3 +34,7 @@ mod edit_parser;
 mod retry_loop;
 mod rollback;
 mod verification;
+
+// Re-export public types
+pub use retry_loop::{ApplyVerifyConfig, ApplyVerifyError, apply_and_verify, apply_only};
+pub use rollback::RollbackStrategy;

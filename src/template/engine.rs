@@ -54,7 +54,7 @@ impl TemplateEngine {
 
         let tmpl = env
             .get_template("__render__")
-            .map_err(|e| TemplateError::Internal(e))?;
+            .map_err(TemplateError::Internal)?;
 
         tmpl.render(ctx.to_value())
             .map_err(|e| convert_minijinja_error(e, ctx))

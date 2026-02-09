@@ -135,6 +135,7 @@ impl RoleExecutor {
             }
         }
 
+        eprintln!("[DEBUG role_executor] AllFailed errors: {:?}", failed);
         Err(ExecutionError::AllFailed { errors: failed })
     }
 

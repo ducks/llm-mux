@@ -21,12 +21,14 @@
 //! println!("Output: {}", response.text);
 //! ```
 
+mod claude_backend;
 mod cli_backend;
 mod http_backend;
-mod output_parser;
+pub mod output_parser;
 mod retry;
 mod types;
 
+pub use claude_backend::ClaudeBackend;
 pub use cli_backend::CliBackend;
 pub use http_backend::HttpBackend;
 pub use retry::{RetryExecutor, with_retry};
@@ -37,7 +39,18 @@ use crate::config::BackendConfig;
 
 /// Create an appropriate executor for a backend config
 pub fn create_executor(name: &str, config: &BackendConfig) -> Box<dyn BackendExecutor> {
-    if config.is_http() {
+    if config.is_claude_api() {
+        match ClaudeBackend::from_config(name, config) {
+            Ok(backend) => Box::new(backend),
+            Err(e) => {
+                eprintln!(
+                    "[WARN] Failed to create Claude API backend: {}, falling back to CLI",
+                    e
+                );
+                Box::new(CliBackend::from_config(name, config))
+            }
+        }
+    } else if config.is_http() {
         Box::new(HttpBackend::from_config(name, config))
     } else {
         Box::new(CliBackend::from_config(name, config))

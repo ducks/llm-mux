@@ -2,6 +2,7 @@
 
 use super::executor::{ExecutionContext, StepExecutionError, execute_step};
 use super::state::{WorkflowResult, WorkflowState};
+use crate::backend_executor::output_parser::extract_json;
 use crate::config::{LlmuxConfig, StepResult, WorkflowConfig};
 use crate::role::detect_team;
 use crate::template::evaluate_expression;
@@ -101,17 +102,21 @@ impl WorkflowRunner {
 
                     // Aggregate results
                     let aggregated = self.aggregate_for_each_results(results);
-                    state.add_result(&step_name, aggregated);
+                    state.add_result(&step_name, aggregated, step.continue_on_error);
                 } else {
                     // Regular step execution
                     match execute_step(step, &ctx, &template_ctx, team.as_deref(), working_dir)
                         .await
                     {
                         Ok(result) => {
-                            state.add_result(&step_name, result);
+                            state.add_result(&step_name, result, step.continue_on_error);
                         }
                         Err(e) if step.continue_on_error => {
-                            state.add_result(&step_name, StepResult::failure(e.to_string(), 0));
+                            state.add_result(
+                                &step_name,
+                                StepResult::failure(e.to_string(), 0),
+                                true,
+                            );
                         }
                         Err(e) => {
                             return Err(WorkflowError::StepFailed {
@@ -212,15 +217,35 @@ impl WorkflowRunner {
         // Try to evaluate as an expression
         let value = evaluate_expression(expr, ctx)?;
 
-        // Convert to array
+        // If it's a string, try to extract JSON first
+        // (minijinja's try_iter on strings iterates characters, which is not what we want)
+        if value.kind() == minijinja::value::ValueKind::String {
+            let s = value.to_string();
+
+            if let Some(json) = extract_json(&s) {
+                // If we found JSON, try to iterate over it
+                if let Some(arr) = json.as_array() {
+                    return Ok(arr.iter().map(json_to_minijinja_value).collect());
+                }
+                // If it's an object, return as single item
+                if json.is_object() {
+                    return Ok(vec![json_to_minijinja_value(&json)]);
+                }
+            }
+
+            // Fall back to comma-separated parsing for plain strings
+            return Ok(s
+                .split(',')
+                .map(|s| Value::from(s.trim().to_string()))
+                .collect());
+        }
+
+        // For non-strings (arrays, maps, etc.), try to iterate directly
         match value.try_iter() {
             Ok(iter) => Ok(iter.collect()),
             Err(_) => {
-                // If not iterable, try to parse as comma-separated
-                let s = value.to_string();
-                Ok(s.split(',')
-                    .map(|s| Value::from(s.trim().to_string()))
-                    .collect())
+                // Shouldn't happen for non-strings, but fallback just in case
+                Ok(vec![value])
             }
         }
     }
@@ -259,6 +284,34 @@ impl WorkflowRunner {
             duration_ms: total_duration,
             backend: backends.first().cloned(),
             backends,
+        }
+    }
+}
+
+/// Convert serde_json::Value to minijinja::value::Value
+fn json_to_minijinja_value(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::from(()),
+        serde_json::Value::Bool(b) => Value::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::from(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::from(f)
+            } else {
+                Value::from(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => Value::from(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Value::from(arr.iter().map(json_to_minijinja_value).collect::<Vec<_>>())
+        }
+        serde_json::Value::Object(obj) => {
+            let map: std::collections::BTreeMap<String, Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja_value(v)))
+                .collect();
+            Value::from_iter(map)
         }
     }
 }

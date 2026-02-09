@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     /// Command to execute (or HTTP URL for API backends)
+    #[serde(default)]
     pub command: String,
 
     /// Arguments to pass to the command
@@ -28,6 +29,13 @@ pub struct BackendConfig {
 
     /// API key (for HTTP backends)
     pub api_key: Option<String>,
+
+    /// Environment variable name containing API key (for Claude API)
+    pub api_key_env: Option<String>,
+
+    /// Backend type: "cli", "http", or "claude-api"
+    #[serde(rename = "type")]
+    pub backend_type: Option<String>,
 
     /// Maximum retry attempts for transient failures
     #[serde(default = "default_max_retries")]
@@ -79,6 +87,8 @@ impl Default for BackendConfig {
             timeout: default_timeout(),
             model: None,
             api_key: None,
+            api_key_env: None,
+            backend_type: None,
             max_retries: default_max_retries(),
             retry_delay: default_retry_delay(),
             retry_rate_limit: true,
@@ -89,14 +99,21 @@ impl Default for BackendConfig {
 }
 
 impl BackendConfig {
+    /// Returns true if this is the Claude API backend
+    pub fn is_claude_api(&self) -> bool {
+        self.backend_type.as_deref() == Some("claude-api")
+            || (self.api_key_env.is_some() && self.command.is_empty())
+    }
+
     /// Returns true if this is an HTTP API backend (URL starts with http)
     pub fn is_http(&self) -> bool {
-        self.command.starts_with("http://") || self.command.starts_with("https://")
+        !self.is_claude_api()
+            && (self.command.starts_with("http://") || self.command.starts_with("https://"))
     }
 
     /// Returns true if this is a CLI backend
     pub fn is_cli(&self) -> bool {
-        !self.is_http()
+        !self.is_http() && !self.is_claude_api()
     }
 }
 
