@@ -130,7 +130,7 @@ pub async fn apply_and_verify(
             None
         };
 
-        let success = verify_result.as_ref().map_or(true, |r| r.success);
+        let success = verify_result.as_ref().is_none_or(|r| r.success);
         let attempt_duration = attempt_start.elapsed();
 
         let attempt = AttemptResult {

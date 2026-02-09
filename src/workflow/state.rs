@@ -67,8 +67,14 @@ impl WorkflowState {
     }
 
     /// Add a step result
-    pub fn add_result(&mut self, step_name: &str, result: StepResult) {
-        if result.failed && !self.workflow.continue_on_error {
+    /// If `step_continue_on_error` is true, a failed result won't fail the workflow
+    pub fn add_result(
+        &mut self,
+        step_name: &str,
+        result: StepResult,
+        step_continue_on_error: bool,
+    ) {
+        if result.failed && !self.workflow.continue_on_error && !step_continue_on_error {
             self.failed = true;
             self.error = result.error.clone();
         }
@@ -212,7 +218,7 @@ mod tests {
         let mut state = WorkflowState::new(workflow, HashMap::new(), PathBuf::from("."));
 
         let result = StepResult::success("output".into(), "shell".into(), 100);
-        state.add_result("step1", result);
+        state.add_result("step1", result, false);
 
         assert!(state.has_result("step1"));
         assert!(!state.has_result("step2"));
@@ -228,7 +234,7 @@ mod tests {
 
         // Add step1 result
         let result = StepResult::success("output".into(), "shell".into(), 100);
-        state.add_result("step1", result);
+        state.add_result("step1", result, false);
 
         assert!(state.dependencies_met("step2"));
     }
@@ -239,7 +245,7 @@ mod tests {
         let mut state = WorkflowState::new(workflow, HashMap::new(), PathBuf::from("."));
 
         let result = StepResult::failure("error".into(), 100);
-        state.add_result("step1", result);
+        state.add_result("step1", result, false);
 
         assert!(state.failed);
     }
@@ -253,7 +259,7 @@ mod tests {
         let mut state = WorkflowState::new(workflow, args, PathBuf::from("."));
 
         let result = StepResult::success("step output".into(), "shell".into(), 100);
-        state.add_result("step1", result);
+        state.add_result("step1", result, false);
 
         let ctx = state.to_template_context();
         assert!(ctx.args.contains_key("issue"));
@@ -266,7 +272,7 @@ mod tests {
         let mut state = WorkflowState::new(workflow, HashMap::new(), PathBuf::from("."));
 
         let result = StepResult::success("output".into(), "shell".into(), 100);
-        state.add_result("step1", result);
+        state.add_result("step1", result, false);
 
         let workflow_result = WorkflowResult::from_state(&state);
 

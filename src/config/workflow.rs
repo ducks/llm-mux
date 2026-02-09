@@ -142,19 +142,6 @@ impl Default for StepConfig {
     }
 }
 
-impl Default for WorkflowConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            version: None,
-            args: HashMap::new(),
-            timeout: None,
-            continue_on_error: false,
-            steps: Vec::new(),
-        }
-    }
-}
 
 /// JSON Schema subset for output validation
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -182,6 +169,7 @@ pub struct PropertySchema {
 /// Full workflow configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct WorkflowConfig {
     /// Workflow name
     pub name: String,

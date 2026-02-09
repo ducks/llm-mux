@@ -2,13 +2,15 @@
 
 //! Step execution logic
 
+use crate::apply_and_verify::RollbackStrategy;
+use crate::apply_and_verify::{ApplyVerifyConfig, ApplyVerifyError, apply_and_verify, apply_only};
 use crate::backend_executor::BackendRequest;
 use crate::config::{LlmuxConfig, StepConfig, StepResult, StepType};
 use crate::role::{RoleExecutor, resolve_role};
 use crate::template::{TemplateContext, TemplateEngine, evaluate_condition};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -36,6 +38,12 @@ pub enum StepExecutionError {
 
     #[error("missing required field '{field}' for step '{step}'")]
     MissingField { step: String, field: String },
+
+    #[error("source step '{source_step}' not found for apply step '{step}'")]
+    SourceNotFound { step: String, source_step: String },
+
+    #[error("apply-verify failed: {0}")]
+    ApplyVerify(#[from] ApplyVerifyError),
 }
 
 /// Context for step execution
@@ -84,19 +92,7 @@ pub async fn execute_step(
     match step.step_type {
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
         StepType::Query => execute_query_step(step, ctx, template_ctx, team).await,
-        StepType::Apply => {
-            // Apply steps are handled by the apply_and_verify module
-            // For now, return a placeholder
-            Ok(StepResult {
-                output: Some("apply step not yet implemented".into()),
-                outputs: std::collections::HashMap::new(),
-                failed: false,
-                error: None,
-                duration_ms: start.elapsed().as_millis() as u64,
-                backend: None,
-                backends: Vec::new(),
-            })
-        }
+        StepType::Apply => execute_apply_step(step, ctx, template_ctx, working_dir).await,
         StepType::Input => {
             // Input steps require user interaction
             Ok(StepResult {
@@ -209,8 +205,6 @@ async fn execute_query_step(
     template_ctx: &TemplateContext,
     team: Option<&str>,
 ) -> Result<StepResult, StepExecutionError> {
-    let _start = Instant::now();
-
     let role_name = step
         .role
         .as_ref()
@@ -242,11 +236,85 @@ async fn execute_query_step(
     Ok(result.to_step_result())
 }
 
+/// Execute an apply step
+async fn execute_apply_step(
+    step: &StepConfig,
+    ctx: &ExecutionContext,
+    template_ctx: &TemplateContext,
+    working_dir: &std::path::Path,
+) -> Result<StepResult, StepExecutionError> {
+    let start = Instant::now();
+
+    // Get source step name
+    let source_step = step
+        .source
+        .as_ref()
+        .ok_or_else(|| StepExecutionError::MissingField {
+            step: step.name.clone(),
+            field: "source".into(),
+        })?;
+
+    // Get source step's output from template context
+    let source_output = template_ctx
+        .steps
+        .get(source_step)
+        .and_then(|r| r.output.as_ref())
+        .ok_or_else(|| StepExecutionError::SourceNotFound {
+            step: step.name.clone(),
+            source_step: source_step.clone(),
+        })?;
+
+    // Build apply-verify config from step config
+    let config = ApplyVerifyConfig {
+        source_step: source_step.clone(),
+        verify_command: step.verify.clone(),
+        verify_retries: step.verify_retries,
+        rollback_strategy: if step.rollback_on_failure {
+            RollbackStrategy::Git
+        } else {
+            RollbackStrategy::None
+        },
+        timeout: None,
+        verify_timeout: Some(Duration::from_secs(300)),
+        retry_prompt: step.verify_retry_prompt.clone(),
+    };
+
+    // Run apply (with or without verification)
+    if config.verify_command.is_some() {
+        let result = apply_and_verify(source_output, &config, working_dir).await?;
+
+        Ok(StepResult {
+            output: result.output,
+            outputs: std::collections::HashMap::new(),
+            failed: !result.success,
+            error: result.error,
+            duration_ms: start.elapsed().as_millis() as u64,
+            backend: Some("apply".into()),
+            backends: vec!["apply".into()],
+        })
+    } else {
+        let result = apply_only(source_output, working_dir).await?;
+
+        Ok(StepResult {
+            output: Some(format!(
+                "Applied edits to {} file(s)",
+                result.modified_files.len() + result.created_files.len()
+            )),
+            outputs: std::collections::HashMap::new(),
+            failed: false,
+            error: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+            backend: Some("apply".into()),
+            backends: vec!["apply".into()],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{BackendConfig, RoleConfig, RoleExecution, StepConfig, StepType};
-    use std::collections::HashMap;
+    
     use tempfile::TempDir;
 
     fn create_test_config() -> LlmuxConfig {

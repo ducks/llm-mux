@@ -1,7 +1,6 @@
-// TODO: Wire up output_parser for structured output validation
-#![allow(dead_code)]
-
 //! Parse and validate backend output
+//!
+//! Handles JSON extraction from LLM output, including markdown code blocks.
 
 use crate::config::OutputSchema;
 use serde_json::Value;

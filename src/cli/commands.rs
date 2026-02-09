@@ -205,7 +205,7 @@ pub fn list_teams(config: &LlmuxConfig, handler: &dyn OutputHandler) {
 
     for (name, team) in &config.teams {
         handler.emit(OutputEvent::Info {
-            message: format!("{}", name),
+            message: name.to_string(),
         });
         if !team.description.is_empty() {
             handler.emit(OutputEvent::Info {
@@ -231,7 +231,7 @@ pub fn list_roles(config: &LlmuxConfig, handler: &dyn OutputHandler) {
 
     for (name, role) in &config.roles {
         handler.emit(OutputEvent::Info {
-            message: format!("{}", name),
+            message: name.to_string(),
         });
         if !role.description.is_empty() {
             handler.emit(OutputEvent::Info {

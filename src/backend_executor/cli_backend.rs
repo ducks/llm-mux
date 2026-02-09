@@ -84,13 +84,7 @@ impl CliBackend {
             cmd.env(key, value);
         }
 
-        // Set working directory if specified
-        if let Some(ref dir) = request.working_dir {
-            cmd.current_dir(dir);
-        }
-
         // Add the prompt as the final argument
-        // Most CLI tools accept the prompt as the last positional arg
         cmd.arg(&request.prompt);
 
         // Configure stdio
@@ -109,6 +103,19 @@ impl BackendExecutor for CliBackend {
         let timeout = request.timeout.unwrap_or(self.timeout);
 
         let mut cmd = self.build_command(request);
+
+        // Set working directory if specified
+        if let Some(ref dir) = request.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        eprintln!(
+            "[DEBUG {}] spawning: {} {:?} {:?}",
+            self.name,
+            self.command,
+            self.args,
+            request.prompt.len()
+        );
 
         // Spawn the process
         let mut child = cmd.spawn().map_err(|e| BackendError::Unavailable {

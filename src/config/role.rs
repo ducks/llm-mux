@@ -67,6 +67,7 @@ pub struct RoleOverride {
 /// Configuration for a team (domain-specific settings)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct TeamConfig {
     /// Human-readable description
     #[serde(default)]
@@ -84,16 +85,6 @@ pub struct TeamConfig {
     pub roles: HashMap<String, RoleOverride>,
 }
 
-impl Default for TeamConfig {
-    fn default() -> Self {
-        Self {
-            description: String::new(),
-            detect: Vec::new(),
-            verify: None,
-            roles: HashMap::new(),
-        }
-    }
-}
 
 impl TeamConfig {
     /// Get the backends for a role, checking team overrides first

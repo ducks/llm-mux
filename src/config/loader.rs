@@ -65,6 +65,7 @@ impl Default for Defaults {
 
 /// Result of executing a step
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct StepResult {
     /// Output for single-backend execution
     pub output: Option<String>,
@@ -88,19 +89,6 @@ pub struct StepResult {
     pub backends: Vec<String>,
 }
 
-impl Default for StepResult {
-    fn default() -> Self {
-        Self {
-            output: None,
-            outputs: HashMap::new(),
-            failed: false,
-            error: None,
-            duration_ms: 0,
-            backend: None,
-            backends: Vec::new(),
-        }
-    }
-}
 
 impl StepResult {
     pub fn success(output: String, backend: String, duration_ms: u64) -> Self {
