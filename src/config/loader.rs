@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Configuration loading with multi-layer merge
 
 use super::{BackendConfig, RoleConfig, TeamConfig, WorkflowConfig};

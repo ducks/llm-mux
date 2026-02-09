@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Signal handling for graceful shutdown
 
 use std::sync::Arc;

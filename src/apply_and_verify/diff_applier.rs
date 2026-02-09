@@ -191,7 +191,7 @@ impl DiffApplier {
         &self,
         lines: &mut Vec<String>,
         hunk: &DiffHunk,
-        path: &Path,
+        _path: &Path,
     ) -> Result<(), ApplyError> {
         // Extract context lines from hunk for matching
         let context_lines: Vec<&str> = hunk

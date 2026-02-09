@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! CLI-based backend executor
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};

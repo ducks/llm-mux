@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Auto-detect project team from marker files
 
 use crate::config::TeamConfig;

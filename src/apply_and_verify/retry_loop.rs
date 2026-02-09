@@ -182,7 +182,7 @@ pub async fn apply_and_verify(
     }
 
     // All attempts failed
-    let last_error = attempts
+    let _last_error = attempts
         .last()
         .and_then(|a| a.verify_result.as_ref())
         .map(|r| r.combined_output())

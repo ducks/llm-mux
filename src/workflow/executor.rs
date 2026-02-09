@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_variables)]
+
 //! Step execution logic
 
 use crate::backend_executor::BackendRequest;
@@ -6,7 +8,7 @@ use crate::role::{RoleExecutor, resolve_role};
 use crate::template::{TemplateContext, TemplateEngine, evaluate_condition};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -207,7 +209,7 @@ async fn execute_query_step(
     template_ctx: &TemplateContext,
     team: Option<&str>,
 ) -> Result<StepResult, StepExecutionError> {
-    let start = Instant::now();
+    let _start = Instant::now();
 
     let role_name = step
         .role

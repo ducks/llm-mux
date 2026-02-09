@@ -7,7 +7,8 @@ mod role;
 mod workflow;
 
 pub use backend::BackendConfig;
-pub use error::{ErrorKind, StepError};
-pub use loader::{Defaults, LlmuxConfig, StepResult, load_workflow};
+pub use loader::{LlmuxConfig, StepResult, load_workflow};
+#[allow(unused_imports)]
 pub use role::{RoleConfig, RoleExecution, RoleOverride, TeamConfig};
-pub use workflow::{ArgDef, OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};
+#[allow(unused_imports)]
+pub use workflow::{OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};

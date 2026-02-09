@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Role and team configuration
 
 use serde::{Deserialize, Serialize};

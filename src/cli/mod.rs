@@ -18,10 +18,4 @@ pub mod commands;
 pub mod output;
 pub mod signals;
 
-pub use commands::{
-    doctor, list_backends, list_roles, list_teams, run_workflow, validate_workflow,
-};
-pub use output::{OutputEvent, OutputHandler, OutputMode, create_handler};
-pub use signals::{
-    CancellationToken, is_shutdown_requested, setup_signal_handlers, with_cancellation,
-};
+pub use output::OutputEvent;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Expression evaluation for step conditionals
 //!
 //! Evaluates expressions like `steps.fix.action == 'fix'` against a template context.

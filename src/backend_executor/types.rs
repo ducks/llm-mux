@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Core types and traits for backend execution
 
 use crate::config::BackendConfig;

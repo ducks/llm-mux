@@ -31,10 +31,11 @@ mod engine;
 mod errors;
 mod filters;
 
+#[allow(unused_imports)]
 pub use conditionals::{evaluate_condition, evaluate_expression, should_execute_step};
-pub use context::{TemplateContext, value_as_bool};
+pub use context::TemplateContext;
 pub use engine::TemplateEngine;
-pub use errors::{SourceLocation, TemplateError, suggest_correction};
+pub use errors::TemplateError;
 
 #[cfg(test)]
 mod tests {

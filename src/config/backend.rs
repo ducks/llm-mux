@@ -1,7 +1,8 @@
+#![allow(dead_code)]
+
 //! Backend configuration for LLM providers
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Configuration for a single LLM backend
 #[derive(Debug, Clone, Deserialize, Serialize)]

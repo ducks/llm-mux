@@ -2,11 +2,8 @@
 //!
 //! Supports console (pretty), JSON, and log output modes.
 
-use crate::config::StepResult;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::time::Duration;
 
 /// Output mode for CLI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

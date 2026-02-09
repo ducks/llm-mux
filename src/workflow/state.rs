@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Workflow execution state
 
 use crate::config::{StepResult, TeamConfig, WorkflowConfig};

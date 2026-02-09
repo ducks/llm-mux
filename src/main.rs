@@ -22,7 +22,7 @@ struct Cli {
     command: Commands,
 
     /// Working directory (defaults to current)
-    #[arg(global = true)]
+    #[arg(long, short = 'C', global = true)]
     dir: Option<PathBuf>,
 
     /// Team to use (overrides auto-detection)

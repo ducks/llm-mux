@@ -3,11 +3,10 @@
 use super::output::{OutputEvent, OutputHandler};
 use crate::config::{LlmuxConfig, load_workflow};
 use crate::role::detect_team;
-use crate::workflow::{WorkflowResult, WorkflowRunner};
+use crate::workflow::WorkflowRunner;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Run a workflow
 pub async fn run_workflow(

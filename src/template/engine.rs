@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Template engine for rendering prompts and commands
 
 use super::context::TemplateContext;

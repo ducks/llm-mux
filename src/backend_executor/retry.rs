@@ -1,3 +1,6 @@
+// TODO: Use RetryExecutor in workflow runner
+#![allow(dead_code)]
+
 //! Retry wrapper with exponential backoff
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, RetryPolicy};

@@ -4,12 +4,11 @@ use super::executor::{ExecutionContext, StepExecutionError, execute_step};
 use super::state::{WorkflowResult, WorkflowState};
 use crate::config::{LlmuxConfig, StepResult, WorkflowConfig};
 use crate::role::detect_team;
-use crate::template::{TemplateEngine, evaluate_expression};
+use crate::template::evaluate_expression;
 use minijinja::value::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 use thiserror::Error;
 
 /// Errors during workflow execution

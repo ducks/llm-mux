@@ -29,11 +29,9 @@ mod types;
 
 pub use cli_backend::CliBackend;
 pub use http_backend::HttpBackend;
-pub use output_parser::{ParsedOutput, extract_json, parse_output};
-pub use retry::{RetryExecutor, with_default_retry, with_retry};
-pub use types::{
-    BackendError, BackendExecutor, BackendRequest, BackendResponse, RetryPolicy, TokenUsage,
-};
+pub use retry::{RetryExecutor, with_retry};
+#[allow(unused_imports)]
+pub use types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, RetryPolicy};
 
 use crate::config::BackendConfig;
 
@@ -47,6 +45,7 @@ pub fn create_executor(name: &str, config: &BackendConfig) -> Box<dyn BackendExe
 }
 
 /// Create an executor with retry logic
+#[allow(dead_code)]
 pub fn create_executor_with_retry(
     name: &str,
     config: &BackendConfig,

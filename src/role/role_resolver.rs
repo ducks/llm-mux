@@ -1,6 +1,8 @@
+#![allow(dead_code)]
+
 //! Resolve role names to backend lists using team context
 
-use crate::config::{LlmuxConfig, RoleConfig, RoleExecution};
+use crate::config::{LlmuxConfig, RoleExecution};
 use thiserror::Error;
 
 /// Errors that can occur during role resolution

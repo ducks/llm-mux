@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Template context for variable resolution
 
 use crate::config::{RoleConfig, StepResult, TeamConfig};

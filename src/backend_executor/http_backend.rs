@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! HTTP API-based backend executor
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};

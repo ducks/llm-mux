@@ -1,3 +1,6 @@
+// TODO: Wire up output_parser for structured output validation
+#![allow(dead_code)]
+
 //! Parse and validate backend output
 
 use crate::config::OutputSchema;

@@ -1,8 +1,8 @@
+#![allow(dead_code)]
+
 //! Execute roles across backends with different execution modes
 
-use crate::backend_executor::{
-    BackendError, BackendExecutor, BackendRequest, BackendResponse, create_executor,
-};
+use crate::backend_executor::{BackendExecutor, BackendRequest, create_executor};
 use crate::config::{LlmuxConfig, RoleExecution, StepResult};
 use std::collections::HashMap;
 use std::sync::Arc;

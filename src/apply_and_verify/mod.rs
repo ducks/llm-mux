@@ -1,3 +1,6 @@
+// TODO: Wire up apply_and_verify to workflow runner for `type = "apply"` steps
+#![allow(dead_code)]
+
 //! Apply and verify module for llmux
 //!
 //! This module handles:
@@ -31,14 +34,3 @@ mod edit_parser;
 mod retry_loop;
 mod rollback;
 mod verification;
-
-pub use diff_applier::{ApplyError, ApplyResult, DiffApplier, ModifiedFile};
-pub use edit_parser::{
-    DiffHunk, DiffLine, EditOperation, EditParseError, normalize_whitespace, parse_edits,
-};
-pub use retry_loop::{
-    ApplyVerifyConfig, ApplyVerifyError, ApplyVerifyResult, AttemptResult, apply_and_verify,
-    apply_only,
-};
-pub use rollback::{RollbackError, RollbackResult, RollbackStrategy, cleanup_backups, rollback};
-pub use verification::{VerifyError, VerifyResult, run_verify};
