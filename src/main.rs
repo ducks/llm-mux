@@ -1,5 +1,6 @@
 mod apply_and_verify;
 mod backend_executor;
+mod cli;
 mod config;
 mod role;
 mod template;
@@ -8,6 +9,10 @@ mod workflow;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use cli::output::{OutputMode, create_handler};
+use cli::{commands, signals};
 
 #[derive(Parser)]
 #[command(name = "llmux")]
@@ -28,11 +33,15 @@ struct Cli {
     #[arg(long, global = true)]
     context: Option<Vec<PathBuf>>,
 
+    /// Output format (console, json, quiet)
+    #[arg(long, global = true, default_value = "console")]
+    output: String,
+
     /// Enable debug output
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Suppress normal output
+    /// Suppress normal output (same as --output=quiet)
     #[arg(long, global = true)]
     quiet: bool,
 }
@@ -44,7 +53,7 @@ enum Commands {
         /// Workflow name
         workflow: String,
 
-        /// Workflow arguments
+        /// Workflow arguments (key=value or positional)
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
@@ -64,6 +73,9 @@ enum Commands {
     /// List configured teams
     Teams,
 
+    /// List configured roles
+    Roles,
+
     /// List available workflows
     Workflows,
 
@@ -75,76 +87,95 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let project_dir = cli.dir.as_deref();
-    let config = config::LlmuxConfig::load(project_dir)?;
+    // Determine output mode
+    let output_mode = if cli.quiet {
+        OutputMode::Quiet
+    } else {
+        OutputMode::from_str(&cli.output)
+    };
 
-    match cli.command {
-        Commands::Doctor => {
-            println!("Checking backends...\n");
-            for (name, backend) in config.enabled_backends() {
-                let status = if backend.is_http() {
-                    format!("http: {}", backend.command)
-                } else {
-                    format!("cli: {}", backend.command)
-                };
-                println!("  {} - {}", name, status);
+    let handler = create_handler(output_mode, cli.debug);
+
+    // Get working directory
+    let working_dir = cli
+        .dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Load config
+    let config = Arc::new(config::LlmuxConfig::load(Some(&working_dir))?);
+
+    // Setup cancellation token for signal handling
+    let cancel_token = signals::CancellationToken::new();
+
+    // Spawn signal handler task
+    let signal_token = cancel_token.clone();
+    tokio::spawn(async move {
+        signals::setup_signal_handlers(signal_token).await;
+    });
+
+    // Execute command
+    let exit_code = match cli.command {
+        Commands::Run { workflow, args } => {
+            match commands::run_workflow(
+                &workflow,
+                args,
+                &working_dir,
+                cli.team.as_deref(),
+                config,
+                &*handler,
+            )
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    1
+                }
             }
-            if config.backends.is_empty() {
-                println!("  (no backends configured)");
-            }
-            println!();
         }
 
-        Commands::Backends => {
-            for (name, backend) in &config.backends {
-                let enabled = if backend.enabled { "✓" } else { "✗" };
-                println!("{} {} - {}", enabled, name, backend.command);
+        Commands::Validate { workflow } => {
+            match commands::validate_workflow(&workflow, Some(&working_dir), &*handler) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    1
+                }
             }
+        }
+
+        Commands::Doctor => commands::doctor(&config, &working_dir, &*handler).await,
+
+        Commands::Backends => {
+            commands::list_backends(&config, &*handler);
+            0
         }
 
         Commands::Teams => {
-            for (name, team) in &config.teams {
-                println!("{}", name);
-                if !team.description.is_empty() {
-                    println!("  {}", team.description);
-                }
-                if !team.detect.is_empty() {
-                    println!("  detect: {:?}", team.detect);
-                }
-                if let Some(ref verify) = team.verify {
-                    println!("  verify: {}", verify);
-                }
-            }
-            if config.teams.is_empty() {
-                println!("(no teams configured)");
-            }
+            commands::list_teams(&config, &*handler);
+            0
+        }
+
+        Commands::Roles => {
+            commands::list_roles(&config, &*handler);
+            0
         }
 
         Commands::Workflows => {
-            println!("(workflow listing not yet implemented)");
-        }
-
-        Commands::Validate { workflow } => match config::load_workflow(&workflow, project_dir) {
-            Ok(wf) => {
-                println!("✓ Workflow '{}' is valid", wf.name);
-                println!("  {} steps", wf.steps.len());
-            }
-            Err(e) => {
-                eprintln!("✗ Workflow validation failed:\n{}", e);
-                std::process::exit(1);
-            }
-        },
-
-        Commands::Run { workflow, args } => {
-            let _wf = config::load_workflow(&workflow, project_dir)?;
-            let _ = args; // TODO: parse workflow args
-            println!("(workflow execution not yet implemented)");
+            handler.emit(cli::OutputEvent::Info {
+                message: "(workflow listing not yet implemented)".into(),
+            });
+            0
         }
 
         Commands::Context => {
-            println!("(context seeding not yet implemented)");
+            handler.emit(cli::OutputEvent::Info {
+                message: "(context seeding not yet implemented)".into(),
+            });
+            0
         }
-    }
+    };
 
-    Ok(())
+    std::process::exit(exit_code);
 }
