@@ -1,5 +1,6 @@
 mod backend_executor;
 mod config;
+mod role;
 mod template;
 
 use anyhow::Result;
