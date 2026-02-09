@@ -25,13 +25,16 @@ pub struct BackendConfig {
     /// Model name (for API backends like Ollama)
     pub model: Option<String>,
 
+    /// API key (for HTTP backends)
+    pub api_key: Option<String>,
+
     /// Maximum retry attempts for transient failures
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
 
     /// Base delay in milliseconds for exponential backoff
     #[serde(default = "default_retry_delay")]
-    pub retry_delay_ms: u64,
+    pub retry_delay: u64,
 
     /// Whether to auto-retry on rate limits
     #[serde(default = "default_true")]
@@ -43,7 +46,7 @@ pub struct BackendConfig {
 
     /// Additional environment variables for the command
     #[serde(default)]
-    pub env: HashMap<String, String>,
+    pub env: Vec<(String, String)>,
 }
 
 fn default_enabled() -> bool {
@@ -74,11 +77,12 @@ impl Default for BackendConfig {
             enabled: true,
             timeout: default_timeout(),
             model: None,
+            api_key: None,
             max_retries: default_max_retries(),
-            retry_delay_ms: default_retry_delay(),
+            retry_delay: default_retry_delay(),
             retry_rate_limit: true,
             retry_timeout: false,
-            env: HashMap::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -119,7 +123,7 @@ mod tests {
             enabled = true
             timeout = 60
             max_retries = 5
-            retry_delay_ms = 2000
+            retry_delay = 2000
         "#;
         let config: BackendConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.command, "codex");

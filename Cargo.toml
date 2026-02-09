@@ -21,6 +21,15 @@ anyhow = "1.0"
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Random (for retry jitter)
+rand = "0.9"
+
+# Async traits
+async-trait = "0.1"
+
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 
