@@ -146,10 +146,20 @@ async fn execute_shell_step(
     let mut stderr = String::new();
 
     if let Some(ref mut out) = child.stdout {
-        out.read_to_string(&mut stdout).await.ok();
+        out.read_to_string(&mut stdout)
+            .await
+            .map_err(|e| StepExecutionError::ShellFailed {
+                message: format!("failed to read stdout: {}", e),
+                exit_code: None,
+            })?;
     }
     if let Some(ref mut err) = child.stderr {
-        err.read_to_string(&mut stderr).await.ok();
+        err.read_to_string(&mut stderr)
+            .await
+            .map_err(|e| StepExecutionError::ShellFailed {
+                message: format!("failed to read stderr: {}", e),
+                exit_code: None,
+            })?;
     }
 
     let status = child
