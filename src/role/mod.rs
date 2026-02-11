@@ -35,7 +35,7 @@ pub use team_detector::detect_team;
 mod tests {
     use super::*;
     use crate::config::{BackendConfig, LlmuxConfig, RoleConfig, RoleExecution, TeamConfig};
-    
+
     use std::sync::Arc;
 
     fn create_full_config() -> LlmuxConfig {

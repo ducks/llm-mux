@@ -85,7 +85,6 @@ pub struct TeamConfig {
     pub roles: HashMap<String, RoleOverride>,
 }
 
-
 impl TeamConfig {
     /// Get the backends for a role, checking team overrides first
     pub fn get_backends_for_role<'a>(

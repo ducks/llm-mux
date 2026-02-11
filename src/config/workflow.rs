@@ -142,7 +142,6 @@ impl Default for StepConfig {
     }
 }
 
-
 /// JSON Schema subset for output validation
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

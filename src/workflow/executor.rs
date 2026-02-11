@@ -324,7 +324,7 @@ async fn execute_apply_step(
 mod tests {
     use super::*;
     use crate::config::{BackendConfig, RoleConfig, RoleExecution, StepConfig, StepType};
-    
+
     use tempfile::TempDir;
 
     fn create_test_config() -> LlmuxConfig {

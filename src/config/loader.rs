@@ -64,8 +64,7 @@ impl Default for Defaults {
 }
 
 /// Result of executing a step
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StepResult {
     /// Output for single-backend execution
     pub output: Option<String>,
@@ -88,7 +87,6 @@ pub struct StepResult {
     /// Backends that executed (for parallel)
     pub backends: Vec<String>,
 }
-
 
 impl StepResult {
     pub fn success(output: String, backend: String, duration_ms: u64) -> Self {
