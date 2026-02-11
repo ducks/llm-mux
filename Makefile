@@ -18,7 +18,7 @@ endef
 VERSION := $(get_next_version)
 
 help:
-	@echo "llmux Makefile"
+	@echo "llm-mux Makefile"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make release                       - Auto-version and release (recommended)"

@@ -1,4 +1,4 @@
-# llmux
+# llm-mux
 
 Multiplexer for LLMs. Route prompts to multiple backends, run them in parallel,
 and orchestrate multi-step workflows.
@@ -13,7 +13,7 @@ cargo install --path .
 
 ### 2. Configure Backends
 
-Create `~/.config/llmux/config.toml`:
+Create `~/.config/llm-mux/config.toml`:
 
 ```toml
 # CLI backends (any command that accepts a prompt)
@@ -58,7 +58,7 @@ execution = "first"
 
 ### 4. Create a Workflow
 
-Create `.llmux/workflows/review.toml` in your project:
+Create `.llm-mux/workflows/review.toml` in your project:
 
 ```toml
 name = "review"
@@ -84,15 +84,15 @@ depends_on = ["diff"]
 ### 5. Run It
 
 ```bash
-llmux run review
+llm-mux run review
 ```
 
 ## Configuration
 
 ### Config Locations
 
-1. `~/.config/llmux/config.toml` (user defaults)
-2. `.llmux/config.toml` (project overrides)
+1. `~/.config/llm-mux/config.toml` (user defaults)
+2. `.llm-mux/config.toml` (project overrides)
 
 Later files override earlier ones.
 
@@ -203,12 +203,12 @@ for_each = "steps.list.output | lines"
 ## CLI Reference
 
 ```
-llmux run <workflow> [args...]   Run a workflow
-llmux validate <workflow>        Validate workflow syntax
-llmux doctor                     Check backend availability
-llmux backends                   List configured backends
-llmux teams                      List configured teams
-llmux roles                      List configured roles
+llm-mux run <workflow> [args...]   Run a workflow
+llm-mux validate <workflow>        Validate workflow syntax
+llm-mux doctor                     Check backend availability
+llm-mux backends                   List configured backends
+llm-mux teams                      List configured teams
+llm-mux roles                      List configured roles
 
 Options:
   --team <name>      Override team detection
@@ -222,7 +222,7 @@ Options:
 ### Simple Review
 
 ```toml
-# .llmux/workflows/review.toml
+# .llm-mux/workflows/review.toml
 name = "review"
 
 [[steps]]

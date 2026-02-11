@@ -1,5 +1,5 @@
 [package]
-name = "llmux"
+name = "llm-mux"
 version = "20260211.0.0"
 edition = "2024"
 description = "Multiplexer for LLMs - route prompts to multiple backends"
