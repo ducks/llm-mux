@@ -1,6 +1,6 @@
 [package]
 name = "llmux"
-version = "0.1.0"
+version = "20260211.0.0"
 edition = "2024"
 description = "Multiplexer for LLMs - route prompts to multiple backends"
 license = "MIT"
