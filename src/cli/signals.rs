@@ -63,21 +63,51 @@ impl Default for CancellationToken {
 }
 
 /// Setup signal handlers
+///
+/// In restricted environments where signal handling is unavailable,
+/// this function will log a warning and wait indefinitely.
 pub async fn setup_signal_handlers(token: CancellationToken) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
 
-        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("Warning: could not install SIGINT handler: {e}");
+                None
+            }
+        };
+        let sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("Warning: could not install SIGTERM handler: {e}");
+                None
+            }
+        };
 
-        tokio::select! {
-            _ = sigint.recv() => {
+        match (sigint, sigterm) {
+            (Some(mut sigint), Some(mut sigterm)) => {
+                tokio::select! {
+                    _ = sigint.recv() => {
+                        eprintln!("\nReceived SIGINT, shutting down...");
+                    }
+                    _ = sigterm.recv() => {
+                        eprintln!("\nReceived SIGTERM, shutting down...");
+                    }
+                }
+            }
+            (Some(mut sigint), None) => {
+                sigint.recv().await;
                 eprintln!("\nReceived SIGINT, shutting down...");
             }
-            _ = sigterm.recv() => {
+            (None, Some(mut sigterm)) => {
+                sigterm.recv().await;
                 eprintln!("\nReceived SIGTERM, shutting down...");
+            }
+            (None, None) => {
+                eprintln!("Warning: signal handling unavailable, graceful shutdown disabled");
+                std::future::pending::<()>().await;
             }
         }
 
@@ -89,8 +119,16 @@ pub async fn setup_signal_handlers(token: CancellationToken) {
     {
         use tokio::signal::ctrl_c;
 
-        ctrl_c().await.expect("failed to install Ctrl+C handler");
-        eprintln!("\nReceived Ctrl+C, shutting down...");
+        match ctrl_c().await {
+            Ok(()) => {
+                eprintln!("\nReceived Ctrl+C, shutting down...");
+            }
+            Err(e) => {
+                eprintln!("Warning: could not install Ctrl+C handler: {e}");
+                eprintln!("Warning: signal handling unavailable, graceful shutdown disabled");
+                std::future::pending::<()>().await;
+            }
+        }
         request_shutdown();
         token.cancel();
     }
