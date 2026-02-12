@@ -78,7 +78,7 @@ impl WorkflowRunner {
             }
 
             if let Some(step) = workflow.steps.iter().find(|s| s.name == step_name) {
-                let template_ctx = state.to_template_context();
+                let mut template_ctx = state.to_template_context();
 
                 // Handle for_each
                 if let Some(ref for_each_expr) = step.for_each {
@@ -86,10 +86,10 @@ impl WorkflowRunner {
                     let mut results = Vec::new();
 
                     for item in items {
-                        let mut item_ctx = template_ctx.clone();
-                        item_ctx.set_item(item);
+                        // Reuse context, just update item (avoids expensive clone)
+                        template_ctx.set_item(item);
 
-                        match execute_step(step, &ctx, &item_ctx, team.as_deref(), working_dir)
+                        match execute_step(step, &ctx, &template_ctx, team.as_deref(), working_dir)
                             .await
                         {
                             Ok(result) => results.push(result),
@@ -99,6 +99,8 @@ impl WorkflowRunner {
                             Err(e) => return Err(e.into()),
                         }
                     }
+                    // Clear item after loop
+                    template_ctx.clear_item();
 
                     // Aggregate results
                     let aggregated = self.aggregate_for_each_results(results);
