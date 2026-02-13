@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 /// Errors during verification
@@ -17,8 +17,8 @@ pub enum VerifyError {
     #[error("verification timed out after {0:?}")]
     Timeout(Duration),
 
-    #[error("failed to read output: {0}")]
-    OutputError(std::io::Error),
+    #[error("failed to read output (exit code {exit_code:?}): {source}")]
+    OutputError { source: std::io::Error, exit_code: Option<i32> },
 }
 
 /// Result of running a verification command
@@ -80,6 +80,16 @@ impl VerifyResult {
     }
 }
 
+/// Attempt to capture the exit code from a child process.
+/// Tries non-blocking first, falls back to blocking wait if process hasn't exited.
+async fn capture_exit_code(child: &mut Child) -> Option<i32> {
+    match child.try_wait() {
+        Ok(Some(status)) => status.code(),
+        Ok(None) => child.wait().await.ok().and_then(|status| status.code()),
+        Err(_) => None,
+    }
+}
+
 /// Run a verification command
 pub async fn run_verify(
     command: &str,
@@ -131,16 +141,16 @@ async fn wait_for_output(
     if let Some(ref mut out) = child.stdout {
         if let Err(e) = out.read_to_string(&mut stdout).await {
             let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(VerifyError::OutputError(e));
+            let exit_code = capture_exit_code(child).await;
+            return Err(VerifyError::OutputError { source: e, exit_code });
         }
     }
 
     if let Some(ref mut err) = child.stderr {
         if let Err(e) = err.read_to_string(&mut stderr).await {
             let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(VerifyError::OutputError(e));
+            let exit_code = capture_exit_code(child).await;
+            return Err(VerifyError::OutputError { source: e, exit_code });
         }
     }
 
