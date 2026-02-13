@@ -5,7 +5,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use crate::process::capture_exit_code;
+use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Errors during verification
@@ -77,16 +78,6 @@ impl VerifyResult {
             output.push_str(&self.stderr);
         }
         output
-    }
-}
-
-/// Attempt to capture the exit code from a child process.
-/// Tries non-blocking first, falls back to blocking wait if process hasn't exited.
-async fn capture_exit_code(child: &mut Child) -> Option<i32> {
-    match child.try_wait() {
-        Ok(Some(status)) => status.code(),
-        Ok(None) => child.wait().await.ok().and_then(|status| status.code()),
-        Err(_) => None,
     }
 }
 

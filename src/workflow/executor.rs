@@ -12,8 +12,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use crate::process::capture_exit_code;
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 /// Errors during step execution
 #[derive(Debug, Error)]
@@ -60,16 +61,6 @@ impl ExecutionContext {
             config,
             template_engine: TemplateEngine::new(),
         }
-    }
-}
-
-/// Attempt to capture the exit code from a child process.
-/// Tries non-blocking first, falls back to blocking wait if process hasn't exited.
-async fn capture_exit_code(child: &mut Child) -> Option<i32> {
-    match child.try_wait() {
-        Ok(Some(status)) => status.code(),
-        Ok(None) => child.wait().await.ok().and_then(|status| status.code()),
-        Err(_) => None,
     }
 }
 
