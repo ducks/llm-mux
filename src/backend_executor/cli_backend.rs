@@ -4,6 +4,7 @@
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
 use crate::config::BackendConfig;
+use crate::process::exit_status_code;
 use async_trait::async_trait;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -200,7 +201,7 @@ impl BackendExecutor for CliBackend {
                     Ok(response)
                 } else {
                     Err(BackendError::execution_failed(
-                        status.code(),
+                        exit_status_code(&status),
                         stdout_text,
                         stderr_text,
                     ))

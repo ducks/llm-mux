@@ -6,7 +6,7 @@ use tokio::process::Child;
 use std::os::unix::process::ExitStatusExt;
 
 /// Extract exit code from ExitStatus, using 128+signal for signal-terminated processes on Unix.
-fn exit_status_code(status: &std::process::ExitStatus) -> Option<i32> {
+pub(crate) fn exit_status_code(status: &std::process::ExitStatus) -> Option<i32> {
     if let Some(code) = status.code() {
         return Some(code);
     }

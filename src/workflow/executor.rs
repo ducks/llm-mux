@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use crate::process::capture_exit_code;
+use crate::process::{capture_exit_code, exit_status_code};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -213,7 +213,7 @@ async fn execute_shell_step(
         })
     } else {
         let error_msg = if stderr.is_empty() {
-            format!("command exited with code {:?}", status.code())
+            format!("command exited with code {:?}", exit_status_code(&status))
         } else {
             stderr.trim().to_string()
         };
@@ -231,7 +231,7 @@ async fn execute_shell_step(
         } else {
             Err(StepExecutionError::ShellFailed {
                 message: error_msg,
-                exit_code: status.code(),
+                exit_code: exit_status_code(&status),
             })
         }
     }

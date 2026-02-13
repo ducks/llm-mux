@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use crate::process::capture_exit_code;
+use crate::process::{capture_exit_code, exit_status_code};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -118,7 +118,7 @@ pub async fn run_verify(
     Ok(if status.success() {
         VerifyResult::success(stdout, stderr, duration)
     } else {
-        VerifyResult::failure(status.code(), stdout, stderr, duration)
+        VerifyResult::failure(exit_status_code(&status), stdout, stderr, duration)
     })
 }
 
