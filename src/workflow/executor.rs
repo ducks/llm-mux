@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 /// Errors during step execution
 #[derive(Debug, Error)]
@@ -60,6 +60,16 @@ impl ExecutionContext {
             config,
             template_engine: TemplateEngine::new(),
         }
+    }
+}
+
+/// Attempt to capture the exit code from a child process.
+/// Tries non-blocking first, falls back to blocking wait if process hasn't exited.
+async fn capture_exit_code(child: &mut Child) -> Option<i32> {
+    match child.try_wait() {
+        Ok(Some(status)) => status.code(),
+        Ok(None) => child.wait().await.ok().and_then(|status| status.code()),
+        Err(_) => None,
     }
 }
 
@@ -146,20 +156,22 @@ async fn execute_shell_step(
     let mut stderr = String::new();
 
     if let Some(ref mut out) = child.stdout {
-        out.read_to_string(&mut stdout)
-            .await
-            .map_err(|e| StepExecutionError::ShellFailed {
+        if let Err(e) = out.read_to_string(&mut stdout).await {
+            let exit_code = capture_exit_code(&mut child).await;
+            return Err(StepExecutionError::ShellFailed {
                 message: format!("failed to read stdout: {}", e),
-                exit_code: None,
-            })?;
+                exit_code,
+            });
+        }
     }
     if let Some(ref mut err) = child.stderr {
-        err.read_to_string(&mut stderr)
-            .await
-            .map_err(|e| StepExecutionError::ShellFailed {
+        if let Err(e) = err.read_to_string(&mut stderr).await {
+            let exit_code = capture_exit_code(&mut child).await;
+            return Err(StepExecutionError::ShellFailed {
                 message: format!("failed to read stderr: {}", e),
-                exit_code: None,
-            })?;
+                exit_code,
+            });
+        }
     }
 
     let status = child
