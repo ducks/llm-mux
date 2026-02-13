@@ -157,6 +157,7 @@ async fn execute_shell_step(
 
     if let Some(ref mut out) = child.stdout {
         if let Err(e) = out.read_to_string(&mut stdout).await {
+            let _ = child.kill().await;
             let exit_code = capture_exit_code(&mut child).await;
             return Err(StepExecutionError::ShellFailed {
                 message: format!("failed to read stdout: {}", e),
@@ -166,6 +167,7 @@ async fn execute_shell_step(
     }
     if let Some(ref mut err) = child.stderr {
         if let Err(e) = err.read_to_string(&mut stderr).await {
+            let _ = child.kill().await;
             let exit_code = capture_exit_code(&mut child).await;
             return Err(StepExecutionError::ShellFailed {
                 message: format!("failed to read stderr: {}", e),
