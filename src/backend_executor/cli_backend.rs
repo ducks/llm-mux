@@ -205,7 +205,12 @@ impl BackendExecutor for CliBackend {
                     ))
                 }
             }
-            Ok(Err(e)) => Err(e),
+            Ok(Err(e)) => {
+                // Kill and reap child to prevent zombie process
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(e)
+            }
             Err(_) => {
                 // Timeout - kill the process
                 let _ = child.kill().await;

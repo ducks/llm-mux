@@ -129,15 +129,19 @@ async fn wait_for_output(
     let mut stderr = String::new();
 
     if let Some(ref mut out) = child.stdout {
-        out.read_to_string(&mut stdout)
-            .await
-            .map_err(VerifyError::OutputError)?;
+        if let Err(e) = out.read_to_string(&mut stdout).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(VerifyError::OutputError(e));
+        }
     }
 
     if let Some(ref mut err) = child.stderr {
-        err.read_to_string(&mut stderr)
-            .await
-            .map_err(VerifyError::OutputError)?;
+        if let Err(e) = err.read_to_string(&mut stderr).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(VerifyError::OutputError(e));
+        }
     }
 
     let status = child.wait().await.map_err(VerifyError::SpawnFailed)?;
