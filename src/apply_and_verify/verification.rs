@@ -132,27 +132,52 @@ pub async fn run_verify(
 }
 
 /// Wait for command output
+/// Reads stdout and stderr concurrently to avoid deadlock when child produces
+/// >64KB on one stream while we're blocked reading the other.
 async fn wait_for_output(
     child: &mut tokio::process::Child,
 ) -> Result<(String, String, std::process::ExitStatus), VerifyError> {
-    let mut stdout = String::new();
-    let mut stderr = String::new();
+    // Take ownership of pipes to read concurrently
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
 
-    if let Some(ref mut out) = child.stdout {
-        if let Err(e) = out.read_to_string(&mut stdout).await {
+    let stdout_fut = async {
+        if let Some(mut out) = stdout_pipe {
+            let mut buf = String::new();
+            out.read_to_string(&mut buf).await.map(|_| buf)
+        } else {
+            Ok(String::new())
+        }
+    };
+
+    let stderr_fut = async {
+        if let Some(mut err) = stderr_pipe {
+            let mut buf = String::new();
+            err.read_to_string(&mut buf).await.map(|_| buf)
+        } else {
+            Ok(String::new())
+        }
+    };
+
+    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
+
+    let stdout = match stdout_result {
+        Ok(s) => s,
+        Err(e) => {
             let _ = child.kill().await;
             let exit_code = capture_exit_code(child).await;
             return Err(VerifyError::OutputError { source: e, exit_code });
         }
-    }
+    };
 
-    if let Some(ref mut err) = child.stderr {
-        if let Err(e) = err.read_to_string(&mut stderr).await {
+    let stderr = match stderr_result {
+        Ok(s) => s,
+        Err(e) => {
             let _ = child.kill().await;
             let exit_code = capture_exit_code(child).await;
             return Err(VerifyError::OutputError { source: e, exit_code });
         }
-    }
+    };
 
     let status = child.wait().await.map_err(VerifyError::SpawnFailed)?;
 
