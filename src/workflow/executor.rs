@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::process::{capture_exit_code, exit_status_code};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 /// Errors during step execution
 #[derive(Debug, Error)]
@@ -45,6 +46,9 @@ pub enum StepExecutionError {
 
     #[error("apply-verify failed: {0}")]
     ApplyVerify(#[from] ApplyVerifyError),
+
+    #[error("shell command timed out after {0:?}")]
+    ShellTimeout(Duration),
 }
 
 /// Context for step execution
@@ -142,62 +146,22 @@ async fn execute_shell_step(
             exit_code: None,
         })?;
 
-    // Read stdout and stderr concurrently to avoid deadlock when child produces
-    // >64KB on one stream while we're blocked reading the other
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let timeout_duration = step.timeout.map(Duration::from_millis);
 
-    let stdout_fut = async {
-        if let Some(mut out) = stdout_pipe {
-            let mut buf = String::new();
-            out.read_to_string(&mut buf).await.map(|_| buf)
-        } else {
-            Ok(String::new())
+    let output_result = if let Some(dur) = timeout_duration {
+        match timeout(dur, wait_for_shell_output(&mut child)).await {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await; // Reap the process
+                return Err(StepExecutionError::ShellTimeout(dur));
+            }
         }
+    } else {
+        wait_for_shell_output(&mut child).await
     };
 
-    let stderr_fut = async {
-        if let Some(mut err) = stderr_pipe {
-            let mut buf = String::new();
-            err.read_to_string(&mut buf).await.map(|_| buf)
-        } else {
-            Ok(String::new())
-        }
-    };
-
-    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
-
-    let stdout = match stdout_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(&mut child).await;
-            return Err(StepExecutionError::ShellFailed {
-                message: format!("failed to read stdout: {}", e),
-                exit_code,
-            });
-        }
-    };
-
-    let stderr = match stderr_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(&mut child).await;
-            return Err(StepExecutionError::ShellFailed {
-                message: format!("failed to read stderr: {}", e),
-                exit_code,
-            });
-        }
-    };
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| StepExecutionError::ShellFailed {
-            message: format!("failed to wait: {}", e),
-            exit_code: None,
-        })?;
+    let (stdout, stderr, status) = output_result?;
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -235,6 +199,70 @@ async fn execute_shell_step(
             })
         }
     }
+}
+
+/// Wait for shell command output, reading stdout and stderr concurrently.
+async fn wait_for_shell_output(
+    child: &mut tokio::process::Child,
+) -> Result<(String, String, std::process::ExitStatus), StepExecutionError> {
+    // Read stdout and stderr concurrently to avoid deadlock when child produces
+    // >64KB on one stream while we're blocked reading the other
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_fut = async {
+        if let Some(mut out) = stdout_pipe {
+            let mut buf = String::new();
+            out.read_to_string(&mut buf).await.map(|_| buf)
+        } else {
+            Ok(String::new())
+        }
+    };
+
+    let stderr_fut = async {
+        if let Some(mut err) = stderr_pipe {
+            let mut buf = String::new();
+            err.read_to_string(&mut buf).await.map(|_| buf)
+        } else {
+            Ok(String::new())
+        }
+    };
+
+    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
+
+    let stdout = match stdout_result {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = child.kill().await;
+            let exit_code = capture_exit_code(child).await;
+            return Err(StepExecutionError::ShellFailed {
+                message: format!("failed to read stdout: {}", e),
+                exit_code,
+            });
+        }
+    };
+
+    let stderr = match stderr_result {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = child.kill().await;
+            let exit_code = capture_exit_code(child).await;
+            return Err(StepExecutionError::ShellFailed {
+                message: format!("failed to read stderr: {}", e),
+                exit_code,
+            });
+        }
+    };
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| StepExecutionError::ShellFailed {
+            message: format!("failed to wait: {}", e),
+            exit_code: None,
+        })?;
+
+    Ok((stdout, stderr, status))
 }
 
 /// Execute a query step
