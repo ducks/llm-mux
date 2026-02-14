@@ -75,46 +75,37 @@ pub(crate) async fn wait_for_child_output(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let stdout_fut = async {
+    let stdout_fut = async move {
         if let Some(mut out) = stdout_pipe {
             let mut buf = String::new();
-            out.read_to_string(&mut buf).await.map(|_| buf)
+            out.read_to_string(&mut buf)
+                .await
+                .map(|_| buf)
+                .map_err(|e| (OutputStream::Stdout, e))
         } else {
             Ok(String::new())
         }
     };
 
-    let stderr_fut = async {
+    let stderr_fut = async move {
         if let Some(mut err) = stderr_pipe {
             let mut buf = String::new();
-            err.read_to_string(&mut buf).await.map(|_| buf)
+            err.read_to_string(&mut buf)
+                .await
+                .map(|_| buf)
+                .map_err(|e| (OutputStream::Stderr, e))
         } else {
             Ok(String::new())
         }
     };
 
-    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
-
-    let stdout = match stdout_result {
-        Ok(s) => s,
-        Err(e) => {
+    let (stdout, stderr) = match tokio::try_join!(stdout_fut, stderr_fut) {
+        Ok(result) => result,
+        Err((stream, e)) => {
             let _ = child.kill().await;
             let exit_code = capture_exit_code(child).await;
             return Err(OutputWaitError::Read {
-                stream: OutputStream::Stdout,
-                source: e,
-                exit_code,
-            });
-        }
-    };
-
-    let stderr = match stderr_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(child).await;
-            return Err(OutputWaitError::Read {
-                stream: OutputStream::Stderr,
+                stream,
                 source: e,
                 exit_code,
             });
@@ -169,5 +160,115 @@ mod tests {
 
         let code = capture_exit_code(&mut child).await;
         assert_eq!(code, Some(42));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_both_streams() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'stdout'; printf 'stderr' >&2")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_ok());
+        let (stdout, stderr, status) = result.unwrap();
+        assert_eq!(stdout, "stdout");
+        assert_eq!(stderr, "stderr");
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_stdout_only() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'stdout'")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_ok());
+        let (stdout, stderr, status) = result.unwrap();
+        assert_eq!(stdout, "stdout");
+        assert_eq!(stderr, "");
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_stderr_only() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'stderr' >&2")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_ok());
+        let (stdout, stderr, status) = result.unwrap();
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "stderr");
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_no_pipes() {
+        let mut child = tokio::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_ok());
+        let (stdout, stderr, status) = result.unwrap();
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_read_error() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '\\xff'")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_err());
+        if let Err(OutputWaitError::Read { stream, .. }) = result {
+            assert!(matches!(stream, OutputStream::Stdout));
+        } else {
+            panic!("Expected Read error, got {:?}", result);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_wait_for_child_output_nonzero_exit() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'output'; exit 42")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        let result = wait_for_child_output(&mut child).await;
+        assert!(result.is_ok());
+        let (stdout, stderr, status) = result.unwrap();
+        assert_eq!(stdout, "output");
+        assert_eq!(stderr, "");
+        assert_eq!(exit_status_code(&status), Some(42));
     }
 }
