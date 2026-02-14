@@ -8,6 +8,10 @@ and orchestrate multi-step workflows.
 ### 1. Install
 
 ```bash
+# From crates.io
+cargo install llm-mux
+
+# Or from source
 cargo install --path .
 ```
 
@@ -284,6 +288,21 @@ verify = "cargo test"
 verify_retries = 2
 depends_on = ["fix"]
 ```
+
+## Contributing
+
+llm-mux is built with Rust. To contribute:
+
+```bash
+git clone https://github.com/ducks/llm-mux
+cd llm-mux
+cargo build
+cargo test
+```
+
+## Publishing
+
+Published to [crates.io](https://crates.io/crates/llm-mux) and [GitHub](https://github.com/ducks/llm-mux).
 
 ## License
 
