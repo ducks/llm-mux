@@ -5,13 +5,13 @@ use tokio::process::Child;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
-fn exit_status_code_parts(code: Option<i32>, signal: Option<i32>) -> Option<i32> {
+fn exit_status_code_parts(code: Option<i32>, _signal: Option<i32>) -> Option<i32> {
     if let Some(code) = code {
         return Some(code);
     }
     #[cfg(unix)]
     {
-        if let Some(signal) = signal {
+        if let Some(signal) = _signal {
             return Some(128 + signal);
         }
     }
