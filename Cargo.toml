@@ -4,6 +4,7 @@ version = "20260213.0.0"
 edition = "2024"
 description = "Multiplexer for LLMs - route prompts to multiple backends"
 license = "MIT"
+repository = "https://github.com/ducks/llm-mux"
 
 [dependencies]
 # Serialization
