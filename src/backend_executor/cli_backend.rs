@@ -85,6 +85,10 @@ impl CliBackend {
             cmd.env(key, value);
         }
 
+        // Remove CLAUDECODE to allow nested Claude Code sessions
+        // (needed when running llm-mux from within Claude Code)
+        cmd.env_remove("CLAUDECODE");
+
         // Add the prompt as the final argument
         cmd.arg(&request.prompt);
 
