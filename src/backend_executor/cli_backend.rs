@@ -220,6 +220,7 @@ impl BackendExecutor for CliBackend {
             Err(_) => {
                 // Timeout - kill the process
                 let _ = child.kill().await;
+                let _ = child.wait().await; // Reap the process
                 let partial = if stdout_lines.is_empty() {
                     None
                 } else {
