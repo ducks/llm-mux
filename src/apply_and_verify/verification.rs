@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use crate::process::{exit_status_code, wait_for_child_output, OutputWaitError};
+use crate::process::{exit_status_code, wait_for_child_output, OutputStream, OutputWaitError};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -20,8 +20,12 @@ pub enum VerifyError {
     #[error("failed to wait for verification command: {0}")]
     WaitFailed(std::io::Error),
 
-    #[error("failed to read output (exit code {exit_code:?}): {source}")]
-    OutputError { source: std::io::Error, exit_code: Option<i32> },
+    #[error("failed to read {stream} (exit code {exit_code:?}): {source}")]
+    OutputError {
+        stream: &'static str,
+        source: std::io::Error,
+        exit_code: Option<i32>,
+    },
 }
 
 /// Result of running a verification command
@@ -102,10 +106,20 @@ pub async fn run_verify(
 
     let map_wait_error = |err: OutputWaitError| match err {
         OutputWaitError::Read {
+            stream,
             source,
             exit_code,
-            ..
-        } => VerifyError::OutputError { source, exit_code },
+        } => {
+            let stream_label = match stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            };
+            VerifyError::OutputError {
+                stream: stream_label,
+                source,
+                exit_code,
+            }
+        }
         OutputWaitError::Wait { source } => VerifyError::WaitFailed(source),
     };
 
