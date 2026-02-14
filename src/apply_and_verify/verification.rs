@@ -4,8 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
-use crate::process::{capture_exit_code, exit_status_code};
+use crate::process::{exit_status_code, wait_for_child_output, OutputWaitError};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -98,10 +97,19 @@ pub async fn run_verify(
         .spawn()
         .map_err(VerifyError::SpawnFailed)?;
 
+    let map_wait_error = |err: OutputWaitError| match err {
+        OutputWaitError::Read {
+            source,
+            exit_code,
+            ..
+        } => VerifyError::OutputError { source, exit_code },
+        OutputWaitError::Wait { source } => VerifyError::SpawnFailed(source),
+    };
+
     // Wrap in timeout if specified
     let result = if let Some(dur) = timeout_duration {
-        match timeout(dur, wait_for_output(&mut child)).await {
-            Ok(r) => r,
+        match timeout(dur, wait_for_child_output(&mut child)).await {
+            Ok(r) => r.map_err(map_wait_error),
             Err(_) => {
                 // Kill the process on timeout
                 let _ = child.kill().await;
@@ -109,7 +117,7 @@ pub async fn run_verify(
             }
         }
     } else {
-        wait_for_output(&mut child).await
+        wait_for_child_output(&mut child).await.map_err(map_wait_error)
     };
 
     let duration = start.elapsed();
@@ -120,59 +128,6 @@ pub async fn run_verify(
     } else {
         VerifyResult::failure(exit_status_code(&status), stdout, stderr, duration)
     })
-}
-
-/// Wait for command output
-/// Reads stdout and stderr concurrently to avoid deadlock when child produces
-/// >64KB on one stream while we're blocked reading the other.
-async fn wait_for_output(
-    child: &mut tokio::process::Child,
-) -> Result<(String, String, std::process::ExitStatus), VerifyError> {
-    // Take ownership of pipes to read concurrently
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let stdout_fut = async {
-        if let Some(mut out) = stdout_pipe {
-            let mut buf = String::new();
-            out.read_to_string(&mut buf).await.map(|_| buf)
-        } else {
-            Ok(String::new())
-        }
-    };
-
-    let stderr_fut = async {
-        if let Some(mut err) = stderr_pipe {
-            let mut buf = String::new();
-            err.read_to_string(&mut buf).await.map(|_| buf)
-        } else {
-            Ok(String::new())
-        }
-    };
-
-    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
-
-    let stdout = match stdout_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(child).await;
-            return Err(VerifyError::OutputError { source: e, exit_code });
-        }
-    };
-
-    let stderr = match stderr_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(child).await;
-            return Err(VerifyError::OutputError { source: e, exit_code });
-        }
-    };
-
-    let status = child.wait().await.map_err(VerifyError::SpawnFailed)?;
-
-    Ok((stdout, stderr, status))
 }
 
 #[cfg(test)]
