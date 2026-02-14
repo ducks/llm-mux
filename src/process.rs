@@ -68,6 +68,7 @@ mod tests {
         assert_eq!(exit_status_code_parts(None, Some(9)), None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_capture_exit_code() {
         let mut child = tokio::process::Command::new("sh")
