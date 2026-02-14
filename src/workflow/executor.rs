@@ -154,6 +154,18 @@ async fn execute_shell_step(
             Err(_) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await; // Reap the process
+                let duration_ms = start.elapsed().as_millis() as u64;
+                if step.continue_on_error {
+                    return Ok(StepResult {
+                        output: None,
+                        outputs: std::collections::HashMap::new(),
+                        failed: true,
+                        error: Some(format!("command timed out after {:?}", dur)),
+                        duration_ms,
+                        backend: Some("shell".into()),
+                        backends: vec!["shell".into()],
+                    });
+                }
                 return Err(StepExecutionError::ShellTimeout(dur));
             }
         }
