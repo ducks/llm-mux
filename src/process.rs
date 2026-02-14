@@ -40,20 +40,30 @@ pub(crate) async fn capture_exit_code(child: &mut Child) -> Option<i32> {
     }
 }
 
+/// Stream types for child processes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum OutputStream {
+    /// Standard output stream.
     Stdout,
+    /// Standard error stream.
     Stderr,
 }
 
+/// Errors occurring while waiting for child process output.
 #[derive(Debug)]
 pub(crate) enum OutputWaitError {
+    /// Error reading from a stream.
     Read {
+        /// The stream where the error occurred.
         stream: OutputStream,
+        /// The underlying IO error.
         source: std::io::Error,
+        /// The exit code of the process if it has already exited.
         exit_code: Option<i32>,
     },
+    /// Error waiting for the process to exit.
     Wait {
+        /// The underlying IO error.
         source: std::io::Error,
     },
 }

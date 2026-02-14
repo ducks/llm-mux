@@ -446,6 +446,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_shell_timeout() {
         let config = Arc::new(create_test_config());
@@ -466,6 +467,7 @@ mod tests {
         assert!(matches!(result, Err(StepExecutionError::ShellTimeout(_))));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_shell_timeout_continue_on_error() {
         let config = Arc::new(create_test_config());
@@ -490,6 +492,7 @@ mod tests {
         assert!(result.error.unwrap().contains("timed out"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_shell_timeout_success() {
         let config = Arc::new(create_test_config());

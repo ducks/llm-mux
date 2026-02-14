@@ -17,6 +17,9 @@ pub enum VerifyError {
     #[error("verification timed out after {0:?}")]
     Timeout(Duration),
 
+    #[error("failed to wait for verification command: {0}")]
+    WaitFailed(std::io::Error),
+
     #[error("failed to read output (exit code {exit_code:?}): {source}")]
     OutputError { source: std::io::Error, exit_code: Option<i32> },
 }
@@ -103,7 +106,7 @@ pub async fn run_verify(
             exit_code,
             ..
         } => VerifyError::OutputError { source, exit_code },
-        OutputWaitError::Wait { source } => VerifyError::SpawnFailed(source),
+        OutputWaitError::Wait { source } => VerifyError::WaitFailed(source),
     };
 
     // Wrap in timeout if specified
@@ -113,6 +116,7 @@ pub async fn run_verify(
             Err(_) => {
                 // Kill the process on timeout
                 let _ = child.kill().await;
+                let _ = child.wait().await; // Reap the process
                 return Err(VerifyError::Timeout(dur));
             }
         }
