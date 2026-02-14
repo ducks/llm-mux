@@ -75,46 +75,37 @@ pub(crate) async fn wait_for_child_output(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let stdout_fut = async {
+    let stdout_fut = async move {
         if let Some(mut out) = stdout_pipe {
             let mut buf = String::new();
-            out.read_to_string(&mut buf).await.map(|_| buf)
+            out.read_to_string(&mut buf)
+                .await
+                .map(|_| buf)
+                .map_err(|e| (OutputStream::Stdout, e))
         } else {
             Ok(String::new())
         }
     };
 
-    let stderr_fut = async {
+    let stderr_fut = async move {
         if let Some(mut err) = stderr_pipe {
             let mut buf = String::new();
-            err.read_to_string(&mut buf).await.map(|_| buf)
+            err.read_to_string(&mut buf)
+                .await
+                .map(|_| buf)
+                .map_err(|e| (OutputStream::Stderr, e))
         } else {
             Ok(String::new())
         }
     };
 
-    let (stdout_result, stderr_result) = tokio::join!(stdout_fut, stderr_fut);
-
-    let stdout = match stdout_result {
-        Ok(s) => s,
-        Err(e) => {
+    let (stdout, stderr) = match tokio::try_join!(stdout_fut, stderr_fut) {
+        Ok(result) => result,
+        Err((stream, e)) => {
             let _ = child.kill().await;
             let exit_code = capture_exit_code(child).await;
             return Err(OutputWaitError::Read {
-                stream: OutputStream::Stdout,
-                source: e,
-                exit_code,
-            });
-        }
-    };
-
-    let stderr = match stderr_result {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = child.kill().await;
-            let exit_code = capture_exit_code(child).await;
-            return Err(OutputWaitError::Read {
-                stream: OutputStream::Stderr,
+                stream,
                 source: e,
                 exit_code,
             });
@@ -228,6 +219,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_wait_for_child_output_no_pipes() {
         let mut child = tokio::process::Command::new("true")
