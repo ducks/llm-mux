@@ -6,13 +6,13 @@ use crate::apply_and_verify::RollbackStrategy;
 use crate::apply_and_verify::{ApplyVerifyConfig, ApplyVerifyError, apply_and_verify, apply_only};
 use crate::backend_executor::BackendRequest;
 use crate::config::{LlmuxConfig, StepConfig, StepResult, StepType};
+use crate::process::{OutputStream, OutputWaitError, exit_status_code, wait_for_child_output};
 use crate::role::{RoleExecutor, resolve_role};
 use crate::template::{TemplateContext, TemplateEngine, evaluate_condition};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use crate::process::{exit_status_code, wait_for_child_output, OutputStream, OutputWaitError};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -190,7 +190,9 @@ async fn execute_shell_step(
             }
         }
     } else {
-        wait_for_child_output(&mut child).await.map_err(map_wait_error)
+        wait_for_child_output(&mut child)
+            .await
+            .map_err(map_wait_error)
     };
 
     let (stdout, stderr, status) = output_result?;

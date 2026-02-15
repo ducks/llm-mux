@@ -1,10 +1,10 @@
 //! Verification command execution
 
+use crate::process::{OutputStream, OutputWaitError, exit_status_code, wait_for_child_output};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use crate::process::{exit_status_code, wait_for_child_output, OutputStream, OutputWaitError};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -135,7 +135,9 @@ pub async fn run_verify(
             }
         }
     } else {
-        wait_for_child_output(&mut child).await.map_err(map_wait_error)
+        wait_for_child_output(&mut child)
+            .await
+            .map_err(map_wait_error)
     };
 
     let duration = start.elapsed();

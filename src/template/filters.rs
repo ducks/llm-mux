@@ -13,6 +13,7 @@ pub fn register_filters(env: &mut minijinja::Environment) {
     env.add_filter("default", filter_default);
     env.add_filter("trim", filter_trim);
     env.add_filter("lines", filter_lines);
+    env.add_filter("strftime", filter_strftime);
 }
 
 /// Escape a string for safe shell interpolation
@@ -128,6 +129,43 @@ fn filter_lines(_state: &State, value: Value) -> Result<Value, Error> {
     let s = value.to_string();
     let lines: Vec<Value> = s.lines().map(|l| Value::from(l.to_string())).collect();
     Ok(Value::from_iter(lines))
+}
+
+/// Format a timestamp using strftime format string
+///
+/// If the input is the string "now", uses the current UTC time.
+/// Otherwise, attempts to parse the input as an RFC3339 timestamp.
+///
+/// Example: `{{ "now" | strftime("%Y-%m-%d %H:%M") }}`
+fn filter_strftime(_state: &State, value: Value, format: Value) -> Result<Value, Error> {
+    let format_str = format.as_str().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidOperation,
+            "strftime filter requires format string as argument",
+        )
+    })?;
+
+    let datetime = if let Some(s) = value.as_str() {
+        if s == "now" {
+            chrono::Utc::now()
+        } else {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidOperation,
+                        format!("Failed to parse datetime: {}", e),
+                    )
+                })?
+                .with_timezone(&chrono::Utc)
+        }
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            "strftime filter requires string input (\"now\" or RFC3339 timestamp)",
+        ));
+    };
+
+    Ok(Value::from(datetime.format(format_str).to_string()))
 }
 
 #[cfg(test)]
@@ -287,5 +325,31 @@ mod tests {
             minijinja::context! { value => "line1\nline2\nline3" },
         );
         assert_eq!(result, "line1");
+    }
+
+    #[test]
+    fn test_strftime_filter_now() {
+        let result = render("{{ \"now\" | strftime(\"%Y\") }}", minijinja::context! {});
+        // Should render current year as 4 digits
+        assert_eq!(result.len(), 4);
+        assert!(result.parse::<i32>().is_ok());
+    }
+
+    #[test]
+    fn test_strftime_filter_rfc3339() {
+        let result = render(
+            "{{ timestamp | strftime(\"%Y-%m-%d\") }}",
+            minijinja::context! { timestamp => "2026-02-14T12:34:56Z" },
+        );
+        assert_eq!(result, "2026-02-14");
+    }
+
+    #[test]
+    fn test_strftime_filter_custom_format() {
+        let result = render(
+            "{{ timestamp | strftime(\"%H:%M\") }}",
+            minijinja::context! { timestamp => "2026-02-14T15:30:00Z" },
+        );
+        assert_eq!(result, "15:30");
     }
 }

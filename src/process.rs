@@ -35,7 +35,11 @@ pub(crate) fn exit_status_code(status: &std::process::ExitStatus) -> Option<i32>
 pub(crate) async fn capture_exit_code(child: &mut Child) -> Option<i32> {
     match child.try_wait() {
         Ok(Some(status)) => exit_status_code(&status),
-        Ok(None) => child.wait().await.ok().and_then(|status| exit_status_code(&status)),
+        Ok(None) => child
+            .wait()
+            .await
+            .ok()
+            .and_then(|status| exit_status_code(&status)),
         Err(_) => None,
     }
 }
