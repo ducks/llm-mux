@@ -8,6 +8,115 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Project type detection and configuration
+#[derive(Debug, Clone, PartialEq)]
+struct ProjectType {
+    name: &'static str,
+    display_name: &'static str,
+    extensions: &'static [&'static str],
+    roles: &'static [(&'static str, &'static str)], // (role_name, description)
+}
+
+impl ProjectType {
+    const RUBY: ProjectType = ProjectType {
+        name: "ruby",
+        display_name: "Ruby/Rails",
+        extensions: &[".rb"],
+        roles: &[
+            ("ruby_n1", "N+1 query detection"),
+            ("ruby_security", "Security vulnerability analysis"),
+            ("ruby_perf", "Performance optimization"),
+        ],
+    };
+
+    const RUST: ProjectType = ProjectType {
+        name: "rust",
+        display_name: "Rust",
+        extensions: &[".rs"],
+        roles: &[
+            ("rust_safety", "Memory safety analysis"),
+            ("rust_perf", "Performance analysis"),
+            ("rust_idioms", "Idiomatic patterns"),
+        ],
+    };
+
+    const JAVASCRIPT: ProjectType = ProjectType {
+        name: "javascript",
+        display_name: "JavaScript/TypeScript",
+        extensions: &[".js", ".ts", ".jsx", ".tsx"],
+        roles: &[
+            ("js_lint", "Code quality and linting"),
+            ("js_security", "Security analysis"),
+        ],
+    };
+
+    const GO: ProjectType = ProjectType {
+        name: "go",
+        display_name: "Go",
+        extensions: &[".go"],
+        roles: &[
+            ("go_idioms", "Idiomatic Go patterns"),
+            ("go_concurrency", "Concurrency and goroutine analysis"),
+            ("go_performance", "Performance optimization"),
+        ],
+    };
+
+    const PYTHON: ProjectType = ProjectType {
+        name: "python",
+        display_name: "Python",
+        extensions: &[".py"],
+        roles: &[
+            ("python_types", "Type hints and mypy analysis"),
+            ("python_performance", "Performance optimization"),
+            ("python_idioms", "Pythonic patterns"),
+        ],
+    };
+
+    const ALL: &'static [ProjectType] = &[
+        Self::RUBY,
+        Self::RUST,
+        Self::JAVASCRIPT,
+        Self::GO,
+        Self::PYTHON,
+    ];
+
+    /// Count files matching this project type in a directory
+    fn count_files(&self, dir: &Path) -> usize {
+        let mut count = 0;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    for ext in self.extensions {
+                        if file_name.ends_with(ext) {
+                            count += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Detect project type by counting files
+    fn detect(dir: &Path) -> Option<&'static ProjectType> {
+        let mut best_match: Option<(&ProjectType, usize)> = None;
+
+        for project_type in Self::ALL {
+            let count = project_type.count_files(dir);
+            if count > 0 {
+                best_match = match best_match {
+                    None => Some((project_type, count)),
+                    Some((_, best_count)) if count > best_count => Some((project_type, count)),
+                    Some(existing) => Some(existing),
+                };
+            }
+        }
+
+        best_match.map(|(pt, _)| pt)
+    }
+}
+
 /// Run a workflow
 pub async fn run_workflow(
     workflow_name: &str,
@@ -264,16 +373,44 @@ pub fn list_roles(config: &LlmuxConfig, handler: &dyn OutputHandler) {
 /// Initialize llmux configuration interactively
 pub async fn init_config(
     working_dir: &Path,
+    global: bool,
+    project: bool,
     no_detect: bool,
     force: bool,
     handler: &dyn OutputHandler,
 ) -> Result<i32, String> {
     use std::fs;
 
-    let config_path = dirs::config_dir()
-        .ok_or_else(|| "Could not determine config directory".to_string())?
-        .join("llmux")
-        .join("config.toml");
+    // Determine scope (default to asking user, but flags override)
+    let is_global = if global {
+        true
+    } else if project {
+        false
+    } else {
+        // Interactive prompt
+        handler.emit(OutputEvent::Info {
+            message: "Initialize configuration:".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  1. Global (~/.config/llmux/config.toml) - backends for all projects".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  2. Project (.llm-mux/config.toml) - roles/teams for this project".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "\nFor first-time setup, choose Global. Run with --global or --project to skip this prompt.\n".into(),
+        });
+        return Ok(0);
+    };
+
+    let config_path = if is_global {
+        dirs::config_dir()
+            .ok_or_else(|| "Could not determine config directory".to_string())?
+            .join("llmux")
+            .join("config.toml")
+    } else {
+        working_dir.join(".llm-mux").join("config.toml")
+    };
 
     // Check if config already exists
     if config_path.exists() && !force {
@@ -286,8 +423,9 @@ pub async fn init_config(
         return Ok(1);
     }
 
+    let scope_name = if is_global { "global" } else { "project" };
     handler.emit(OutputEvent::Info {
-        message: "=== llm-mux configuration setup ===\n".into(),
+        message: format!("=== llm-mux {} configuration setup ===\n", scope_name),
     });
 
     // Detect available backends
@@ -372,49 +510,23 @@ pub async fn init_config(
         return Ok(1);
     }
 
-    // Detect project type
-    let mut project_type = None;
-    if !no_detect {
+    // Detect project type (only for project init)
+    let project_type = if !is_global && !no_detect {
         handler.emit(OutputEvent::Info {
             message: "\nDetecting project type...".into(),
         });
 
-        // Count file extensions
-        let mut rb_count = 0;
-        let mut rs_count = 0;
-        let mut js_ts_count = 0;
-
-        if let Ok(entries) = std::fs::read_dir(working_dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_name) = entry.file_name().into_string() {
-                    if file_name.ends_with(".rb") {
-                        rb_count += 1;
-                    } else if file_name.ends_with(".rs") {
-                        rs_count += 1;
-                    } else if file_name.ends_with(".js") || file_name.ends_with(".ts") {
-                        js_ts_count += 1;
-                    }
-                }
-            }
+        if let Some(detected) = ProjectType::detect(working_dir) {
+            handler.emit(OutputEvent::Info {
+                message: format!("  Detected: {} project", detected.display_name),
+            });
+            Some(detected)
+        } else {
+            None
         }
-
-        if rb_count > rs_count && rb_count > js_ts_count {
-            project_type = Some("ruby");
-            handler.emit(OutputEvent::Info {
-                message: "  Detected: Ruby/Rails project".into(),
-            });
-        } else if rs_count > rb_count && rs_count > js_ts_count {
-            project_type = Some("rust");
-            handler.emit(OutputEvent::Info {
-                message: "  Detected: Rust project".into(),
-            });
-        } else if js_ts_count > 0 {
-            project_type = Some("javascript");
-            handler.emit(OutputEvent::Info {
-                message: "  Detected: JavaScript/TypeScript project".into(),
-            });
-        }
-    }
+    } else {
+        None
+    };
 
     // Generate config
     handler.emit(OutputEvent::Info {
@@ -457,51 +569,21 @@ pub async fn init_config(
         }
     }
 
-    // Add basic roles
-    config_content.push_str("# Basic roles\n");
-    config_content.push_str("[roles.default]\n");
-    config_content.push_str("description = \"Default role for general queries\"\n");
-    config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-    config_content.push_str("execution = \"first\"\n\n");
-
-    // Add project-specific roles
-    if let Some(ptype) = project_type {
-        config_content.push_str(&format!("# {} team roles\n", ptype));
-        match ptype {
-            "ruby" => {
-                config_content.push_str("[roles.ruby_n1]\n");
-                config_content.push_str("description = \"N+1 query detection\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-
-                config_content.push_str("[roles.ruby_security]\n");
-                config_content.push_str("description = \"Security vulnerability analysis\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-            }
-            "rust" => {
-                config_content.push_str("[roles.rust_safety]\n");
-                config_content.push_str("description = \"Memory safety analysis\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-
-                config_content.push_str("[roles.rust_perf]\n");
-                config_content.push_str("description = \"Performance analysis\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-            }
-            "javascript" => {
-                config_content.push_str("[roles.js_lint]\n");
-                config_content.push_str("description = \"Code quality and linting\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-
-                config_content.push_str("[roles.js_security]\n");
-                config_content.push_str("description = \"Security analysis\"\n");
-                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
-                config_content.push_str("execution = \"first\"\n\n");
-            }
-            _ => {}
+    // Add roles (global gets basic default, project gets detected roles)
+    if is_global {
+        config_content.push_str("# Basic roles\n");
+        config_content.push_str("[roles.default]\n");
+        config_content.push_str("description = \"Default role for general queries\"\n");
+        config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+        config_content.push_str("execution = \"first\"\n\n");
+    } else if let Some(ptype) = project_type {
+        // Project-specific roles
+        config_content.push_str(&format!("# {} team roles\n", ptype.display_name));
+        for (role_name, description) in ptype.roles {
+            config_content.push_str(&format!("[roles.{}]\n", role_name));
+            config_content.push_str(&format!("description = \"{}\"\n", description));
+            config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+            config_content.push_str("execution = \"first\"\n\n");
         }
     }
 
@@ -518,18 +600,34 @@ pub async fn init_config(
     handler.emit(OutputEvent::Info {
         message: format!("\n✓ Configuration written to {}", config_path.display()),
     });
-    handler.emit(OutputEvent::Info {
-        message: "\nNext steps:".into(),
-    });
-    handler.emit(OutputEvent::Info {
-        message: "  1. Review and customize your config".into(),
-    });
-    handler.emit(OutputEvent::Info {
-        message: "  2. Run 'llm-mux doctor' to test backends".into(),
-    });
-    handler.emit(OutputEvent::Info {
-        message: "  3. Create workflows in ~/.config/llmux/workflows/".into(),
-    });
+
+    if is_global {
+        handler.emit(OutputEvent::Info {
+            message: "\nNext steps:".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  1. Run 'llm-mux doctor' to test backends".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  2. Run 'llm-mux init --project' in your project directories".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  3. Create workflows in ~/.config/llmux/workflows/".into(),
+        });
+    } else {
+        handler.emit(OutputEvent::Info {
+            message: "\nNext steps:".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  1. Review and customize project-specific roles".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  2. Create workflows in .llm-mux/workflows/".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "  3. Add .llm-mux/ to your .gitignore if needed".into(),
+        });
+    }
 
     Ok(0)
 }
