@@ -19,9 +19,6 @@ pub struct ClaudeBackend {
     /// Model to use
     model: String,
 
-    /// Default timeout
-    timeout: Duration,
-
     /// HTTP client
     client: reqwest::Client,
 }
@@ -67,7 +64,6 @@ impl ClaudeBackend {
             name: name.into(),
             api_key,
             model,
-            timeout: Duration::from_secs(config.timeout),
             client,
         })
     }
