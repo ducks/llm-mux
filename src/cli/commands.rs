@@ -261,6 +261,279 @@ pub fn list_roles(config: &LlmuxConfig, handler: &dyn OutputHandler) {
     }
 }
 
+/// Initialize llmux configuration interactively
+pub async fn init_config(
+    working_dir: &Path,
+    no_detect: bool,
+    force: bool,
+    handler: &dyn OutputHandler,
+) -> Result<i32, String> {
+    use std::fs;
+
+    let config_path = dirs::config_dir()
+        .ok_or_else(|| "Could not determine config directory".to_string())?
+        .join("llmux")
+        .join("config.toml");
+
+    // Check if config already exists
+    if config_path.exists() && !force {
+        handler.emit(OutputEvent::Info {
+            message: format!("Config already exists at {}", config_path.display()),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "Use --force to overwrite".into(),
+        });
+        return Ok(1);
+    }
+
+    handler.emit(OutputEvent::Info {
+        message: "=== llm-mux configuration setup ===\n".into(),
+    });
+
+    // Detect available backends
+    handler.emit(OutputEvent::Info {
+        message: "Detecting available LLM backends...".into(),
+    });
+
+    let mut detected_backends = Vec::new();
+
+    // Check for claude
+    if let Ok(output) = tokio::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .await
+    {
+        if output.status.success() {
+            detected_backends.push("claude");
+            handler.emit(OutputEvent::Info {
+                message: "  ✓ claude".into(),
+            });
+        }
+    }
+
+    // Check for codex
+    if let Ok(output) = tokio::process::Command::new("which")
+        .arg("codex")
+        .output()
+        .await
+    {
+        if output.status.success() {
+            detected_backends.push("codex");
+            handler.emit(OutputEvent::Info {
+                message: "  ✓ codex".into(),
+            });
+        }
+    }
+
+    // Check for gemini-cli (npx)
+    if let Ok(output) = tokio::process::Command::new("npx")
+        .arg("--yes")
+        .arg("@google/gemini-cli")
+        .arg("--version")
+        .output()
+        .await
+    {
+        if output.status.success() {
+            detected_backends.push("gemini");
+            handler.emit(OutputEvent::Info {
+                message: "  ✓ gemini".into(),
+            });
+        }
+    }
+
+    // Check for ollama
+    if let Ok(output) = tokio::process::Command::new("curl")
+        .arg("-s")
+        .arg("http://localhost:11434/api/tags")
+        .output()
+        .await
+    {
+        if output.status.success() {
+            detected_backends.push("ollama");
+            handler.emit(OutputEvent::Info {
+                message: "  ✓ ollama".into(),
+            });
+        }
+    }
+
+    if detected_backends.is_empty() {
+        handler.emit(OutputEvent::Info {
+            message: "\n  No LLM backends detected. Install at least one:".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "    - claude: https://claude.ai/download".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "    - codex: https://github.com/openai/codex".into(),
+        });
+        handler.emit(OutputEvent::Info {
+            message: "    - ollama: https://ollama.ai".into(),
+        });
+        return Ok(1);
+    }
+
+    // Detect project type
+    let mut project_type = None;
+    if !no_detect {
+        handler.emit(OutputEvent::Info {
+            message: "\nDetecting project type...".into(),
+        });
+
+        // Count file extensions
+        let mut rb_count = 0;
+        let mut rs_count = 0;
+        let mut js_ts_count = 0;
+
+        if let Ok(entries) = std::fs::read_dir(working_dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    if file_name.ends_with(".rb") {
+                        rb_count += 1;
+                    } else if file_name.ends_with(".rs") {
+                        rs_count += 1;
+                    } else if file_name.ends_with(".js") || file_name.ends_with(".ts") {
+                        js_ts_count += 1;
+                    }
+                }
+            }
+        }
+
+        if rb_count > rs_count && rb_count > js_ts_count {
+            project_type = Some("ruby");
+            handler.emit(OutputEvent::Info {
+                message: "  Detected: Ruby/Rails project".into(),
+            });
+        } else if rs_count > rb_count && rs_count > js_ts_count {
+            project_type = Some("rust");
+            handler.emit(OutputEvent::Info {
+                message: "  Detected: Rust project".into(),
+            });
+        } else if js_ts_count > 0 {
+            project_type = Some("javascript");
+            handler.emit(OutputEvent::Info {
+                message: "  Detected: JavaScript/TypeScript project".into(),
+            });
+        }
+    }
+
+    // Generate config
+    handler.emit(OutputEvent::Info {
+        message: "\nGenerating configuration...".into(),
+    });
+
+    let mut config_content = String::new();
+
+    // Add backends
+    config_content.push_str("# Backends\n");
+    for backend in &detected_backends {
+        match *backend {
+            "claude" => {
+                config_content.push_str("[backends.claude]\n");
+                config_content.push_str("enabled = true\n");
+                config_content.push_str("command = \"claude\"\n");
+                config_content.push_str("args = [\"-p\", \"--\"]\n");
+                config_content.push_str("timeout = 600\n\n");
+            }
+            "codex" => {
+                config_content.push_str("[backends.codex]\n");
+                config_content.push_str("enabled = true\n");
+                config_content.push_str("command = \"codex\"\n");
+                config_content.push_str("args = [\"exec\", \"--json\", \"-s\", \"read-only\"]\n\n");
+            }
+            "gemini" => {
+                config_content.push_str("[backends.gemini]\n");
+                config_content.push_str("enabled = true\n");
+                config_content.push_str("command = \"npx\"\n");
+                config_content.push_str("args = [\"@google/gemini-cli\", \"-m\", \"gemini-2.0-flash\"]\n");
+                config_content.push_str("timeout = 300\n\n");
+            }
+            "ollama" => {
+                config_content.push_str("[backends.ollama]\n");
+                config_content.push_str("enabled = true\n");
+                config_content.push_str("command = \"http://localhost:11434\"\n");
+                config_content.push_str("model = \"qwen3-coder-next\"\n\n");
+            }
+            _ => {}
+        }
+    }
+
+    // Add basic roles
+    config_content.push_str("# Basic roles\n");
+    config_content.push_str("[roles.default]\n");
+    config_content.push_str("description = \"Default role for general queries\"\n");
+    config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+    config_content.push_str("execution = \"first\"\n\n");
+
+    // Add project-specific roles
+    if let Some(ptype) = project_type {
+        config_content.push_str(&format!("# {} team roles\n", ptype));
+        match ptype {
+            "ruby" => {
+                config_content.push_str("[roles.ruby_n1]\n");
+                config_content.push_str("description = \"N+1 query detection\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+
+                config_content.push_str("[roles.ruby_security]\n");
+                config_content.push_str("description = \"Security vulnerability analysis\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+            }
+            "rust" => {
+                config_content.push_str("[roles.rust_safety]\n");
+                config_content.push_str("description = \"Memory safety analysis\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+
+                config_content.push_str("[roles.rust_perf]\n");
+                config_content.push_str("description = \"Performance analysis\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+            }
+            "javascript" => {
+                config_content.push_str("[roles.js_lint]\n");
+                config_content.push_str("description = \"Code quality and linting\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+
+                config_content.push_str("[roles.js_security]\n");
+                config_content.push_str("description = \"Security analysis\"\n");
+                config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+                config_content.push_str("execution = \"first\"\n\n");
+            }
+            _ => {}
+        }
+    }
+
+    // Create config directory if needed
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config directory: {}", e))?;
+    }
+
+    // Write config
+    fs::write(&config_path, config_content)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    handler.emit(OutputEvent::Info {
+        message: format!("\n✓ Configuration written to {}", config_path.display()),
+    });
+    handler.emit(OutputEvent::Info {
+        message: "\nNext steps:".into(),
+    });
+    handler.emit(OutputEvent::Info {
+        message: "  1. Review and customize your config".into(),
+    });
+    handler.emit(OutputEvent::Info {
+        message: "  2. Run 'llm-mux doctor' to test backends".into(),
+    });
+    handler.emit(OutputEvent::Info {
+        message: "  3. Create workflows in ~/.config/llmux/workflows/".into(),
+    });
+
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

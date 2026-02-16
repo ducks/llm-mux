@@ -86,6 +86,17 @@ enum Commands {
 
     /// Gather and seed project context
     Context,
+
+    /// Interactive configuration setup
+    Init {
+        /// Skip project type detection
+        #[arg(long)]
+        no_detect: bool,
+
+        /// Force overwrite existing config
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -180,6 +191,16 @@ async fn main() -> Result<()> {
                 message: "(context seeding not yet implemented)".into(),
             });
             0
+        }
+
+        Commands::Init { no_detect, force } => {
+            match commands::init_config(&working_dir, no_detect, force, &*handler).await {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    1
+                }
+            }
         }
     };
 
