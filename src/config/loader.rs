@@ -2,7 +2,7 @@
 
 //! Configuration loading with multi-layer merge
 
-use super::{BackendConfig, RoleConfig, TeamConfig, WorkflowConfig};
+use super::{BackendConfig, EcosystemConfig, RoleConfig, TeamConfig, WorkflowConfig};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +27,10 @@ pub struct LlmuxConfig {
     /// Team definitions
     #[serde(default)]
     pub teams: HashMap<String, TeamConfig>,
+
+    /// Ecosystem definitions
+    #[serde(default)]
+    pub ecosystems: HashMap<String, EcosystemConfig>,
 }
 
 /// Global default settings
@@ -140,8 +144,8 @@ impl LlmuxConfig {
 
         // Load project config
         let project_config_path = project_dir
-            .map(|p| p.join(".llmux/config.toml"))
-            .unwrap_or_else(|| PathBuf::from(".llmux/config.toml"));
+            .map(|p| p.join(".llm-mux/config.toml"))
+            .unwrap_or_else(|| PathBuf::from(".llm-mux/config.toml"));
 
         if project_config_path.exists() {
             let project_config = Self::load_file(&project_config_path)
@@ -196,6 +200,11 @@ impl LlmuxConfig {
         for (name, team) in other.teams {
             self.teams.insert(name, team);
         }
+
+        // Merge ecosystems (other wins for same key)
+        for (name, ecosystem) in other.ecosystems {
+            self.ecosystems.insert(name, ecosystem);
+        }
     }
 
     /// Get a backend by name
@@ -213,6 +222,11 @@ impl LlmuxConfig {
         self.teams.get(name)
     }
 
+    /// Get an ecosystem by name
+    pub fn get_ecosystem(&self, name: &str) -> Option<&EcosystemConfig> {
+        self.ecosystems.get(name)
+    }
+
     /// Get all enabled backends
     pub fn enabled_backends(&self) -> impl Iterator<Item = (&String, &BackendConfig)> {
         self.backends.iter().filter(|(_, b)| b.enabled)
@@ -222,16 +236,16 @@ impl LlmuxConfig {
 /// Load a workflow from the standard hierarchy
 ///
 /// Search order (first match wins):
-/// 1. .llmux/workflows/{name}.toml (project)
-/// 2. ~/.config/llmux/workflows/{name}.toml (user)
+/// 1. .llm-mux/workflows/{name}.toml (project)
+/// 2. ~/.config/llm-mux/workflows/{name}.toml (user)
 /// 3. Built-in workflows (embedded)
 pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowConfig> {
     let filename = format!("{}.toml", name);
 
     // Check project workflows
     let project_path = project_dir
-        .map(|p| p.join(".llmux/workflows").join(&filename))
-        .unwrap_or_else(|| PathBuf::from(".llmux/workflows").join(&filename));
+        .map(|p| p.join(".llm-mux/workflows").join(&filename))
+        .unwrap_or_else(|| PathBuf::from(".llm-mux/workflows").join(&filename));
 
     if project_path.exists() {
         return load_workflow_file(&project_path);
@@ -239,7 +253,7 @@ pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowC
 
     // Check user workflows
     if let Some(user_dir) = dirs::config_dir() {
-        let user_path = user_dir.join("llmux/workflows").join(&filename);
+        let user_path = user_dir.join("llm-mux/workflows").join(&filename);
         if user_path.exists() {
             return load_workflow_file(&user_path);
         }

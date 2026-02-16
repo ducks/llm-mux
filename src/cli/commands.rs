@@ -370,6 +370,47 @@ pub fn list_roles(config: &LlmuxConfig, handler: &dyn OutputHandler) {
     }
 }
 
+/// List configured ecosystems
+pub fn list_ecosystems(config: &LlmuxConfig, handler: &dyn OutputHandler) {
+    if config.ecosystems.is_empty() {
+        handler.emit(OutputEvent::Info {
+            message: "(no ecosystems configured)".into(),
+        });
+        return;
+    }
+
+    for (name, ecosystem) in &config.ecosystems {
+        handler.emit(OutputEvent::Info {
+            message: name.to_string(),
+        });
+        if !ecosystem.description.is_empty() {
+            handler.emit(OutputEvent::Info {
+                message: format!("  {}", ecosystem.description),
+            });
+        }
+        if !ecosystem.projects.is_empty() {
+            handler.emit(OutputEvent::Info {
+                message: format!("  projects: {} configured", ecosystem.projects.len()),
+            });
+            for (project_name, project) in &ecosystem.projects {
+                handler.emit(OutputEvent::Info {
+                    message: format!("    {} -> {}", project_name, project.path.display()),
+                });
+                if !project.depends_on.is_empty() {
+                    handler.emit(OutputEvent::Info {
+                        message: format!("      depends_on: {:?}", project.depends_on),
+                    });
+                }
+            }
+        }
+        if !ecosystem.knowledge.is_empty() {
+            handler.emit(OutputEvent::Info {
+                message: format!("  knowledge: {} facts", ecosystem.knowledge.len()),
+            });
+        }
+    }
+}
+
 /// Initialize llmux configuration interactively
 pub async fn init_config(
     working_dir: &Path,

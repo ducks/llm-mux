@@ -81,6 +81,9 @@ enum Commands {
     /// List configured roles
     Roles,
 
+    /// List configured ecosystems
+    Ecosystems,
+
     /// List available workflows
     Workflows,
 
@@ -184,6 +187,11 @@ async fn main() -> Result<()> {
 
         Commands::Roles => {
             commands::list_roles(&config, &*handler);
+            0
+        }
+
+        Commands::Ecosystems => {
+            commands::list_ecosystems(&config, &*handler);
             0
         }
 
