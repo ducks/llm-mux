@@ -167,8 +167,9 @@ pub async fn run_workflow(
         if let Some(output) = final_output {
             // Create parent directories if they don't exist
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create directory {}: {}", parent.display(), e)
+                })?;
             }
             std::fs::write(path, output)
                 .map_err(|e| format!("Failed to write output to {}: {}", path.display(), e))?;
@@ -433,7 +434,8 @@ pub async fn init_config(
             message: "Initialize configuration:".into(),
         });
         handler.emit(OutputEvent::Info {
-            message: "  1. Global (~/.config/llm-mux/config.toml) - backends for all projects".into(),
+            message: "  1. Global (~/.config/llm-mux/config.toml) - backends for all projects"
+                .into(),
         });
         handler.emit(OutputEvent::Info {
             message: "  2. Project (.llm-mux/config.toml) - roles/teams for this project".into(),
@@ -597,7 +599,8 @@ pub async fn init_config(
                 config_content.push_str("[backends.gemini]\n");
                 config_content.push_str("enabled = true\n");
                 config_content.push_str("command = \"npx\"\n");
-                config_content.push_str("args = [\"@google/gemini-cli\", \"-m\", \"gemini-2.0-flash\"]\n");
+                config_content
+                    .push_str("args = [\"@google/gemini-cli\", \"-m\", \"gemini-2.0-flash\"]\n");
                 config_content.push_str("timeout = 300\n\n");
             }
             "ollama" => {

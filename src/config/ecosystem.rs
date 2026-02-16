@@ -31,7 +31,7 @@ pub struct ProjectConfig {
 }
 
 /// Configuration for an ecosystem (group of related projects)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EcosystemConfig {
     /// Human-readable description
@@ -45,16 +45,6 @@ pub struct EcosystemConfig {
     /// Facts/knowledge about this ecosystem
     #[serde(default)]
     pub knowledge: Vec<String>,
-}
-
-impl Default for EcosystemConfig {
-    fn default() -> Self {
-        Self {
-            description: String::new(),
-            projects: HashMap::new(),
-            knowledge: Vec::new(),
-        }
-    }
 }
 
 impl EcosystemConfig {

@@ -209,8 +209,15 @@ async fn main() -> Result<()> {
             0
         }
 
-        Commands::Init { global, project, no_detect, force } => {
-            match commands::init_config(&working_dir, global, project, no_detect, force, &*handler).await {
+        Commands::Init {
+            global,
+            project,
+            no_detect,
+            force,
+        } => {
+            match commands::init_config(&working_dir, global, project, no_detect, force, &*handler)
+                .await
+            {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("Error: {}", e);
