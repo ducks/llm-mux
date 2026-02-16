@@ -89,7 +89,15 @@ enum Commands {
 
     /// Interactive configuration setup
     Init {
-        /// Skip project type detection
+        /// Initialize global config (~/.config/llmux/config.toml)
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Initialize project config (.llm-mux/config.toml)
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+
+        /// Skip project type detection (only for project init)
         #[arg(long)]
         no_detect: bool,
 
@@ -193,8 +201,8 @@ async fn main() -> Result<()> {
             0
         }
 
-        Commands::Init { no_detect, force } => {
-            match commands::init_config(&working_dir, no_detect, force, &*handler).await {
+        Commands::Init { global, project, no_detect, force } => {
+            match commands::init_config(&working_dir, global, project, no_detect, force, &*handler).await {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("Error: {}", e);
