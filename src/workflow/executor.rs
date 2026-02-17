@@ -521,7 +521,10 @@ async fn execute_store_step(
         })?;
 
     // Render template to get the actual JSON data
-    let json_data = ctx.template_engine.render(input, template_ctx)?;
+    let rendered_data = ctx.template_engine.render(input, template_ctx)?;
+
+    // Strip markdown fences if present
+    let json_data = strip_markdown_fences(&rendered_data).to_string();
 
     // Get ecosystem name from context
     let ecosystem_name = template_ctx
