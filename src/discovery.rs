@@ -1,4 +1,22 @@
-//! Ecosystem discovery - analyze projects and seed knowledge base
+//! Ecosystem discovery utilities - static file analysis helpers
+//!
+//! This module provides utility functions for analyzing projects and extracting
+//! structured information from manifest files. These functions are meant to be
+//! called by discovery workflows, not directly by CLI commands.
+//!
+//! Discovery workflows should:
+//! 1. Use static analysis functions to gather basic facts
+//! 2. Call LLM roles to perform deep analysis
+//! 3. Store discovered facts in the memory database
+//!
+//! Example discovery workflow:
+//! ```toml
+//! [[steps]]
+//! name = "analyze"
+//! type = "query"
+//! role = "ecosystem_analyzer"
+//! prompt = "Analyze {{ ecosystem.name }} and discover relationships..."
+//! ```
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

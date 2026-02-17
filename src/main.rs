@@ -89,16 +89,6 @@ enum Commands {
     /// List available workflows
     Workflows,
 
-    /// Discover and seed ecosystem knowledge
-    Discover {
-        /// Ecosystem name
-        ecosystem: String,
-
-        /// Force re-discovery (overwrite existing facts)
-        #[arg(long)]
-        force: bool,
-    },
-
     /// Gather and seed project context
     Context,
 
@@ -212,16 +202,6 @@ async fn main() -> Result<()> {
                 message: "(workflow listing not yet implemented)".into(),
             });
             0
-        }
-
-        Commands::Discover { ecosystem, force } => {
-            match commands::discover_ecosystem(&ecosystem, force, &config, &*handler).await {
-                Ok(code) => code,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    1
-                }
-            }
         }
 
         Commands::Context => {

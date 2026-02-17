@@ -412,69 +412,6 @@ pub fn list_ecosystems(config: &LlmuxConfig, handler: &dyn OutputHandler) {
     }
 }
 
-/// Discover and seed ecosystem knowledge
-pub async fn discover_ecosystem(
-    ecosystem_name: &str,
-    force: bool,
-    config: &LlmuxConfig,
-    handler: &dyn OutputHandler,
-) -> Result<i32, String> {
-    use crate::discovery;
-
-    handler.emit(OutputEvent::Info {
-        message: format!("Discovering ecosystem '{}'...", ecosystem_name),
-    });
-
-    // Get ecosystem config
-    let ecosystem_config = config
-        .ecosystems
-        .get(ecosystem_name)
-        .ok_or_else(|| format!("Ecosystem '{}' not found in config", ecosystem_name))?;
-
-    // Run discovery
-    match discovery::discover_ecosystem(ecosystem_name, ecosystem_config, force).await {
-        Ok(all_facts) => {
-            handler.emit(OutputEvent::Info {
-                message: String::new(),
-            });
-
-            let mut total_facts = 0;
-
-            // Report discovered facts per project
-            for (project_name, facts) in &all_facts {
-                if !facts.is_empty() {
-                    handler.emit(OutputEvent::Info {
-                        message: format!("{}:", project_name),
-                    });
-                    for fact in facts {
-                        handler.emit(OutputEvent::Info {
-                            message: format!("  ✓ {} ({})", fact.fact, fact.source),
-                        });
-                        total_facts += 1;
-                    }
-                    handler.emit(OutputEvent::Info {
-                        message: String::new(),
-                    });
-                }
-            }
-
-            // Add ecosystem-level knowledge count
-            total_facts += ecosystem_config.knowledge.len();
-
-            handler.emit(OutputEvent::Info {
-                message: format!(
-                    "✓ Discovered {} facts across {} projects",
-                    total_facts,
-                    all_facts.len()
-                ),
-            });
-
-            Ok(0)
-        }
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Initialize llmux configuration interactively
 pub async fn init_config(
     working_dir: &Path,
