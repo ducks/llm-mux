@@ -1,0 +1,150 @@
+# Ecosystem Discovery Workflow
+#
+# Analyzes all projects in an ecosystem and discovers facts, relationships,
+# and patterns using LLM-powered deep analysis.
+#
+# Usage: llm-mux run discover-ecosystem ecosystem=discourse
+#
+# This workflow:
+# 1. Analyzes each project's codebase structure
+# 2. Discovers relationships between projects
+# 3. Identifies patterns and architectural decisions
+# 4. Stores all findings in the memory database
+
+name = "discover-ecosystem"
+description = "LLM-powered ecosystem analysis and knowledge discovery"
+
+[[steps]]
+name = "analyze_structure"
+type = "query"
+role = "ecosystem_analyzer"
+timeout = 180
+prompt = """
+Analyze the {{ ecosystem.name }} ecosystem structure.
+
+Projects:
+{% for project in ecosystem.projects %}
+- {{ project.name }} ({{ project.path }})
+  {% if project.type %}Type: {{ project.type }}{% endif %}
+{% endfor %}
+
+Task: For each project, analyze its directory structure and main configuration files.
+Focus on understanding what each project does and what technologies it uses.
+
+IMPORTANT: Return JSON with this exact structure:
+{
+  "facts": [
+    {
+      "project": "project-name",
+      "fact": "brief fact description",
+      "source": "where you found this (e.g., Cargo.toml, README.md)",
+      "confidence": 1.0
+    }
+  ]
+}
+
+Each fact MUST have all four fields: project, fact, source, confidence.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["facts"]
+
+[steps.output_schema.properties.facts]
+type = "array"
+
+[[steps]]
+name = "find_dependencies"
+type = "query"
+role = "ecosystem_analyzer"
+timeout = 180
+prompt = """
+Analyze dependencies in {{ ecosystem.name }} ecosystem.
+
+Projects: {{ ecosystem.projects | map(attribute='name') | join(', ') }}
+
+Task: Look at manifest files (Gemfile, package.json, Cargo.toml, etc.) to find:
+1. External dependencies (gems, npm packages, crates)
+2. Shared dependencies across projects
+3. Version patterns
+
+IMPORTANT: Return JSON with this exact structure:
+{
+  "facts": [
+    {
+      "project": "project-name",
+      "fact": "brief fact about dependencies",
+      "source": "manifest file name (e.g., Cargo.toml)",
+      "confidence": 1.0
+    }
+  ]
+}
+
+Each fact MUST have all four fields: project, fact, source, confidence.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["facts"]
+
+[steps.output_schema.properties.facts]
+type = "array"
+
+[[steps]]
+name = "discover_relationships"
+type = "query"
+role = "ecosystem_analyzer"
+timeout = 180
+prompt = """
+Discover relationships between projects in {{ ecosystem.name }}.
+
+Projects analyzed:
+{{ steps.analyze_structure.output | trim }}
+
+Known config relationships:
+{% for project in ecosystem.projects %}
+{% if project.depends_on %}- {{ project.name }} depends_on: {{ project.depends_on | join(", ") }}{% endif %}
+{% endfor %}
+
+Task: Look for evidence of how projects communicate:
+- API calls between services
+- Shared databases
+- Message queues
+- Deployment dependencies
+
+IMPORTANT: Return JSON with this exact structure:
+{
+  "relationships": [
+    {
+      "from": "source-project",
+      "to": "target-project",
+      "type": "depends_on|calls_api|shares_db|deploys_with",
+      "evidence": "brief explanation of the relationship"
+    }
+  ]
+}
+
+Each relationship MUST have these fields: from, to, type, evidence.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["relationships"]
+
+[steps.output_schema.properties.relationships]
+type = "array"
+
+[[steps]]
+name = "store_structure"
+type = "store"
+prompt = "{{ steps.analyze_structure.output }}"
+
+[[steps]]
+name = "store_dependencies"
+type = "store"
+prompt = "{{ steps.find_dependencies.output }}"
+
+[[steps]]
+name = "store_relationships"
+type = "store"
+prompt = "{{ steps.discover_relationships.output }}"

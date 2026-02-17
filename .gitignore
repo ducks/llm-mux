@@ -1,5 +1,6 @@
 /target
 .gems/
+.llm-mux/
 
 
 # Added by cargo
