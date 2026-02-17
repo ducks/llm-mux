@@ -13,6 +13,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             ecosystem TEXT NOT NULL,
             fact TEXT NOT NULL,
             source TEXT NOT NULL,
+            source_type TEXT,
+            category TEXT,
             confidence REAL NOT NULL DEFAULT 1.0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -21,6 +23,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_facts_ecosystem ON facts(ecosystem);
         CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source);
+        CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
+        CREATE INDEX IF NOT EXISTS idx_facts_source_type ON facts(source_type);
 
         CREATE TABLE IF NOT EXISTS project_relationships (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

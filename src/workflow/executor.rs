@@ -582,11 +582,23 @@ fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::E
                 fact_json.get("source").and_then(|v| v.as_str()),
                 fact_json.get("confidence").and_then(|v| v.as_f64()),
             ) {
+                // Extract optional category and source_type
+                let category = fact_json
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let source_type = fact_json
+                    .get("source_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 let fact = Fact {
                     id: None,
                     ecosystem: ecosystem.to_string(),
                     fact: format!("{}: {}", project, fact_text),
                     source: source.to_string(),
+                    source_type,
+                    category,
                     confidence,
                     created_at: String::new(),
                     updated_at: String::new(),

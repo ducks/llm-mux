@@ -38,12 +38,15 @@ IMPORTANT: Return JSON with this exact structure:
       "project": "project-name",
       "fact": "brief fact description",
       "source": "where you found this (e.g., Cargo.toml, README.md)",
+      "source_type": "file|config|analysis",
+      "category": "dependency|architecture|technology|pattern",
       "confidence": 1.0
     }
   ]
 }
 
-Each fact MUST have all four fields: project, fact, source, confidence.
+Each fact MUST have: project, fact, source, confidence.
+Optional but recommended: source_type (file/config/analysis), category (dependency/architecture/technology/pattern).
 """
 
 [steps.output_schema]

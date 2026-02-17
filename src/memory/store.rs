@@ -14,6 +14,8 @@ pub struct Fact {
     pub ecosystem: String,
     pub fact: String,
     pub source: String,
+    pub source_type: Option<String>,
+    pub category: Option<String>,
     pub confidence: f64,
     pub created_at: String,
     pub updated_at: String,
@@ -95,15 +97,19 @@ impl EcosystemMemory {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO facts (ecosystem, fact, source, confidence, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO facts (ecosystem, fact, source, source_type, category, confidence, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(ecosystem, fact, source) DO UPDATE SET
+                source_type = excluded.source_type,
+                category = excluded.category,
                 confidence = excluded.confidence,
                 updated_at = excluded.updated_at",
             (
                 &fact.ecosystem,
                 &fact.fact,
                 &fact.source,
+                &fact.source_type,
+                &fact.category,
                 fact.confidence,
                 &now,
                 &now,
@@ -116,7 +122,7 @@ impl EcosystemMemory {
     /// Get all facts for an ecosystem
     pub fn get_facts(&self, ecosystem: &str) -> Result<Vec<Fact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ecosystem, fact, source, confidence, created_at, updated_at
+            "SELECT id, ecosystem, fact, source, source_type, category, confidence, created_at, updated_at
              FROM facts
              WHERE ecosystem = ?1
              ORDER BY confidence DESC, created_at DESC",
@@ -129,9 +135,11 @@ impl EcosystemMemory {
                     ecosystem: row.get(1)?,
                     fact: row.get(2)?,
                     source: row.get(3)?,
-                    confidence: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    source_type: row.get(4)?,
+                    category: row.get(5)?,
+                    confidence: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -366,6 +374,8 @@ mod tests {
             ecosystem: "test".into(),
             fact: "Uses PostgreSQL".into(),
             source: "config".into(),
+            source_type: Some("file".into()),
+            category: Some("dependency".into()),
             confidence: 1.0,
             created_at: String::new(),
             updated_at: String::new(),
