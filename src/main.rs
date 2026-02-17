@@ -2,6 +2,7 @@ mod apply_and_verify;
 mod backend_executor;
 mod cli;
 mod config;
+mod memory;
 mod process;
 mod role;
 mod template;
