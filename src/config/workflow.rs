@@ -15,6 +15,8 @@ pub enum StepType {
     Apply,
     /// Wait for human input
     Input,
+    /// Store data in memory database
+    Store,
 }
 
 /// Argument definition for a workflow
@@ -247,6 +249,11 @@ impl WorkflowConfig {
                 StepType::Input => {
                     if step.prompt.is_none() {
                         errors.push(format!("input step '{}' missing 'prompt' field", step.name));
+                    }
+                }
+                StepType::Store => {
+                    if step.prompt.is_none() {
+                        errors.push(format!("store step '{}' missing 'prompt' field (use for input data)", step.name));
                     }
                 }
             }

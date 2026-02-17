@@ -97,6 +97,7 @@ pub async fn execute_step(
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
         StepType::Query => execute_query_step(step, ctx, template_ctx, team).await,
         StepType::Apply => execute_apply_step(step, ctx, template_ctx, working_dir).await,
+        StepType::Store => execute_store_step(step, ctx, template_ctx).await,
         StepType::Input => {
             // Input steps require user interaction
             Ok(StepResult {
@@ -345,6 +346,135 @@ async fn execute_apply_step(
             backends: vec!["apply".into()],
         })
     }
+}
+
+/// Execute a store step - saves discovered data to memory database
+async fn execute_store_step(
+    step: &StepConfig,
+    ctx: &ExecutionContext,
+    template_ctx: &TemplateContext,
+) -> Result<StepResult, StepExecutionError> {
+    let start = Instant::now();
+
+    // Get the input data (from previous step's output)
+    let input = step
+        .prompt
+        .as_ref()
+        .ok_or_else(|| StepExecutionError::MissingField {
+            step: step.name.clone(),
+            field: "prompt".into(),
+        })?;
+
+    // Render template to get the actual JSON data
+    let json_data = ctx.template_engine.render(input, template_ctx)?;
+
+    // Get ecosystem name from context
+    let ecosystem_name = template_ctx
+        .ecosystem
+        .as_ref()
+        .map(|e| e.name.clone())
+        .ok_or_else(|| StepExecutionError::MissingField {
+            step: step.name.clone(),
+            field: "ecosystem".into(),
+        })?;
+
+    // Parse and store the data
+    let result = store_json_data(&ecosystem_name, &json_data);
+
+    let (summary, failed, error) = match result {
+        Ok(msg) => (msg, false, None),
+        Err(e) => (
+            format!("Failed to store data: {}", e),
+            true,
+            Some(format!("{}", e)),
+        ),
+    };
+
+    Ok(StepResult {
+        output: Some(summary),
+        outputs: std::collections::HashMap::new(),
+        failed,
+        error,
+        duration_ms: start.elapsed().as_millis() as u64,
+        backend: Some("store".into()),
+        backends: vec!["store".into()],
+    })
+}
+
+/// Parse JSON output from LLM and store in SQLite memory database
+fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::Error> {
+    use crate::memory::{EcosystemMemory, Fact, ProjectRelationship};
+
+    // Parse JSON
+    let parsed: serde_json::Value = serde_json::from_str(json_data)?;
+
+    // Open memory database
+    let db_path = EcosystemMemory::default_path(ecosystem)?;
+    let mut memory = EcosystemMemory::open(&db_path)?;
+
+    let mut facts_stored = 0;
+    let mut relationships_stored = 0;
+
+    // Store facts if present
+    if let Some(facts_array) = parsed.get("facts").and_then(|v| v.as_array()) {
+        for fact_json in facts_array {
+            if let (Some(project), Some(fact_text), Some(source), Some(confidence)) = (
+                fact_json.get("project").and_then(|v| v.as_str()),
+                fact_json.get("fact").and_then(|v| v.as_str()),
+                fact_json.get("source").and_then(|v| v.as_str()),
+                fact_json.get("confidence").and_then(|v| v.as_f64()),
+            ) {
+                let fact = Fact {
+                    id: None,
+                    ecosystem: ecosystem.to_string(),
+                    fact: format!("{}: {}", project, fact_text),
+                    source: source.to_string(),
+                    confidence,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                };
+
+                memory.add_fact(&fact)?;
+                facts_stored += 1;
+            }
+        }
+    }
+
+    // Store relationships if present
+    if let Some(relationships_array) = parsed.get("relationships").and_then(|v| v.as_array()) {
+        for rel_json in relationships_array {
+            if let (Some(from), Some(to), Some(rel_type)) = (
+                rel_json.get("from").and_then(|v| v.as_str()),
+                rel_json.get("to").and_then(|v| v.as_str()),
+                rel_json.get("type").and_then(|v| v.as_str()),
+            ) {
+                let evidence = rel_json
+                    .get("evidence")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let rel = ProjectRelationship {
+                    id: None,
+                    ecosystem: ecosystem.to_string(),
+                    from_project: from.to_string(),
+                    to_project: to.to_string(),
+                    relationship_type: rel_type.to_string(),
+                    metadata: evidence.map(|e| format!(r#"{{"evidence":"{}"}}"#, e)),
+                    created_at: String::new(),
+                };
+
+                memory.add_relationship(&rel)?;
+                relationships_stored += 1;
+            }
+        }
+    }
+
+    Ok(format!(
+        "Stored {} facts and {} relationships in {}",
+        facts_stored,
+        relationships_stored,
+        db_path.display()
+    ))
 }
 
 #[cfg(test)]
