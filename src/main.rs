@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         Some(logging::default_log_path("llm-mux")?)
     } else {
         cli.output_file.as_ref().and_then(|path| {
-            if path.extension().map_or(false, |ext| ext == "log") {
+            if path.extension().is_some_and(|ext| ext == "log") {
                 Some(path.clone())
             } else {
                 None

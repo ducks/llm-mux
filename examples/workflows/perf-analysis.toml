@@ -1,0 +1,112 @@
+name = "perf-analysis"
+description = "Analyze codebase for performance issues, memory leaks, and potential 500 errors"
+
+[[steps]]
+name = "find_n_plus_one"
+type = "query"
+role = "analyzer"
+timeout = 180
+prompt = """
+Search the codebase for N+1 query patterns that could cause 500 errors or performance issues.
+
+Look for:
+- Controllers/models that iterate over collections without .includes or .preload
+- Loops that make database queries inside them
+- Missing eager loading in associations
+
+Focus on Ruby/Rails code in app/controllers/, app/models/, lib/
+
+Return findings in JSON format.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["findings"]
+
+[steps.output_schema.properties.findings]
+type = "array"
+
+[[steps]]
+name = "find_memory_leaks"
+type = "query"
+role = "analyzer"
+timeout = 180
+prompt = """
+Search for common memory leak patterns in the codebase.
+
+Look for:
+- Large object allocations without cleanup
+- ImageMagick/image processing without .destroy! calls
+- File handles not being closed
+- Growing arrays/hashes in long-running processes
+- Sidekiq jobs with large allocations and no GC hints
+- Caching without size limits or expiration
+
+Focus on app/jobs/, app/services/, lib/
+
+Return findings in JSON format.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["findings"]
+
+[steps.output_schema.properties.findings]
+type = "array"
+
+[[steps]]
+name = "find_error_prone_code"
+type = "query"
+role = "analyzer"
+timeout = 180
+prompt = """
+Search for code patterns that commonly cause 500 errors.
+
+Look for:
+- Missing nil checks before method calls
+- Database queries without error handling
+- External API calls without timeout or rescue
+- Division operations without zero checks
+- Array/hash access without checking if key exists
+- File operations without checking if file exists
+
+Focus on app/controllers/, app/services/, lib/
+
+Return findings in JSON format.
+"""
+
+[steps.output_schema]
+type = "object"
+required = ["findings"]
+
+[steps.output_schema.properties.findings]
+type = "array"
+
+[[steps]]
+name = "summarize"
+type = "query"
+role = "synthesizer"
+timeout = 120
+prompt = """
+Summarize the performance and stability findings.
+
+N+1 Queries:
+{{ steps.find_n_plus_one.output }}
+
+Memory Leaks:
+{{ steps.find_memory_leaks.output }}
+
+Error-Prone Code:
+{{ steps.find_error_prone_code.output }}
+
+Create a prioritized report with:
+1. Critical issues (likely to cause 500s or severe performance problems)
+2. High priority issues (memory leaks, performance degradation)
+3. Medium priority issues (potential future problems)
+
+For each issue, provide:
+- Location (file:line)
+- Severity (critical/high/medium)
+- Description
+- Recommended fix
+"""

@@ -3,6 +3,8 @@
 //! This module provides utility functions for analyzing projects and extracting
 //! structured information from manifest files. These functions are meant to be
 //! called by discovery workflows, not directly by CLI commands.
+
+#![allow(dead_code)]
 //!
 //! Discovery workflows should:
 //! 1. Use static analysis functions to gather basic facts

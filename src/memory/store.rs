@@ -58,6 +58,9 @@ pub struct WorkflowRun {
     pub workflow_name: String,
     pub success: bool,
     pub duration_ms: Option<i64>,
+    pub failed_step: Option<String>,
+    pub error_message: Option<String>,
+    pub output_dir: Option<String>,
     pub created_at: String,
 }
 
@@ -318,14 +321,17 @@ impl EcosystemMemory {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO workflow_runs (ecosystem, project, workflow_name, success, duration_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO workflow_runs (ecosystem, project, workflow_name, success, duration_ms, failed_step, error_message, output_dir, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 &run.ecosystem,
                 &run.project,
                 &run.workflow_name,
                 run.success,
                 run.duration_ms,
+                &run.failed_step,
+                &run.error_message,
+                &run.output_dir,
                 &now,
             ),
         )?;
@@ -336,7 +342,7 @@ impl EcosystemMemory {
     /// Get recent workflow runs
     pub fn get_recent_runs(&self, ecosystem: &str, limit: usize) -> Result<Vec<WorkflowRun>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ecosystem, project, workflow_name, success, duration_ms, created_at
+            "SELECT id, ecosystem, project, workflow_name, success, duration_ms, failed_step, error_message, output_dir, created_at
              FROM workflow_runs
              WHERE ecosystem = ?1
              ORDER BY created_at DESC
@@ -352,7 +358,10 @@ impl EcosystemMemory {
                     workflow_name: row.get(3)?,
                     success: row.get(4)?,
                     duration_ms: row.get(5)?,
-                    created_at: row.get(6)?,
+                    failed_step: row.get(6)?,
+                    error_message: row.get(7)?,
+                    output_dir: row.get(8)?,
+                    created_at: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -424,6 +433,9 @@ mod tests {
             workflow_name: "bug-hunt".into(),
             success: true,
             duration_ms: Some(5000),
+            failed_step: None,
+            error_message: None,
+            output_dir: Some("/tmp/workflows/bug-hunt-123".into()),
             created_at: String::new(),
         };
 
@@ -433,5 +445,6 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].workflow_name, "bug-hunt");
         assert!(runs[0].success);
+        assert_eq!(runs[0].output_dir, Some("/tmp/workflows/bug-hunt-123".into()));
     }
 }

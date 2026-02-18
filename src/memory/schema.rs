@@ -68,6 +68,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             workflow_name TEXT NOT NULL,
             success INTEGER NOT NULL,
             duration_ms INTEGER,
+            failed_step TEXT,
+            error_message TEXT,
+            output_dir TEXT,
             created_at TEXT NOT NULL
         );
 
