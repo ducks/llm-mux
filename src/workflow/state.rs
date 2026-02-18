@@ -179,6 +179,9 @@ pub struct WorkflowResult {
 
     /// Team that was used
     pub team: Option<String>,
+
+    /// Output directory where step outputs are saved
+    pub output_dir: Option<String>,
 }
 
 impl WorkflowResult {
@@ -190,6 +193,7 @@ impl WorkflowResult {
             error: state.error.clone(),
             duration: state.elapsed(),
             team: state.team.clone(),
+            output_dir: None,
         }
     }
 

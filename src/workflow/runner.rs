@@ -9,7 +9,7 @@ use crate::role::detect_team;
 use crate::template::evaluate_expression;
 use minijinja::value::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -43,6 +43,49 @@ impl WorkflowRunner {
         Self { config }
     }
 
+    /// Create output directory for workflow run
+    fn create_output_dir(workflow_name: &str) -> Result<PathBuf, WorkflowError> {
+        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let dir_name = format!("{}-{}", workflow_name, timestamp);
+
+        let output_dir = std::env::temp_dir().join("llm-mux").join("workflows").join(dir_name);
+
+        std::fs::create_dir_all(&output_dir).map_err(|e| {
+            WorkflowError::StepFailed {
+                step: "create_output_dir".into(),
+                message: format!("Failed to create output directory: {}", e),
+            }
+        })?;
+
+        tracing::info!(path = %output_dir.display(), "Created workflow output directory");
+        Ok(output_dir)
+    }
+
+    /// Save step output to file
+    fn save_step_output(
+        output_dir: &Path,
+        step_name: &str,
+        output: &str,
+        failed: bool,
+    ) -> Result<(), std::io::Error> {
+        let filename = if failed {
+            format!("{}.failed.txt", step_name)
+        } else {
+            format!("{}.txt", step_name)
+        };
+
+        let output_path = output_dir.join(filename);
+        std::fs::write(&output_path, output)?;
+
+        tracing::debug!(
+            step = step_name,
+            path = %output_path.display(),
+            "Saved step output"
+        );
+
+        Ok(())
+    }
+
     /// Run a workflow
     pub async fn run(
         &self,
@@ -53,6 +96,9 @@ impl WorkflowRunner {
     ) -> Result<WorkflowResult, WorkflowError> {
         // Validate workflow first
         self.validate_workflow(&workflow)?;
+
+        // Create output directory for this workflow run
+        let output_dir = Self::create_output_dir(&workflow.name)?;
 
         // Detect team
         let team = detect_team(working_dir, &self.config.teams, team_override);
@@ -99,16 +145,51 @@ impl WorkflowRunner {
                     let items = self.evaluate_for_each(for_each_expr, &template_ctx)?;
                     let mut results = Vec::new();
 
-                    for item in items {
+                    for (idx, item) in items.into_iter().enumerate() {
                         // Reuse context, just update item (avoids expensive clone)
                         template_ctx.set_item(item);
 
                         match execute_step(step, &ctx, &template_ctx, team.as_deref(), working_dir)
                             .await
                         {
-                            Ok(result) => results.push(result),
+                            Ok(result) => {
+                                // Save output for each iteration
+                                if let Some(ref output) = result.output {
+                                    let iter_step_name = format!("{}.{}", step_name, idx);
+                                    if let Err(e) = Self::save_step_output(
+                                        &output_dir,
+                                        &iter_step_name,
+                                        output,
+                                        result.failed,
+                                    ) {
+                                        tracing::warn!(
+                                            step = &iter_step_name,
+                                            error = %e,
+                                            "Failed to save iteration output"
+                                        );
+                                    }
+                                }
+                                results.push(result);
+                            }
                             Err(e) if step.continue_on_error => {
-                                results.push(StepResult::failure(e.to_string(), 0));
+                                let error_msg = e.to_string();
+                                let iter_step_name = format!("{}.{}", step_name, idx);
+
+                                // Save error for this iteration
+                                if let Err(err) = Self::save_step_output(
+                                    &output_dir,
+                                    &iter_step_name,
+                                    &error_msg,
+                                    true,
+                                ) {
+                                    tracing::warn!(
+                                        step = &iter_step_name,
+                                        error = %err,
+                                        "Failed to save iteration error"
+                                    );
+                                }
+
+                                results.push(StepResult::failure(error_msg, 0));
                             }
                             Err(e) => return Err(e.into()),
                         }
@@ -125,19 +206,61 @@ impl WorkflowRunner {
                         .await
                     {
                         Ok(result) => {
+                            // Save step output to file
+                            if let Some(ref output) = result.output {
+                                if let Err(e) = Self::save_step_output(
+                                    &output_dir,
+                                    &step_name,
+                                    output,
+                                    result.failed,
+                                ) {
+                                    tracing::warn!(
+                                        step = &step_name,
+                                        error = %e,
+                                        "Failed to save step output"
+                                    );
+                                }
+                            }
+
                             state.add_result(&step_name, result, step.continue_on_error);
                         }
                         Err(e) if step.continue_on_error => {
+                            let error_msg = e.to_string();
+
+                            // Save error output
+                            if let Err(err) =
+                                Self::save_step_output(&output_dir, &step_name, &error_msg, true)
+                            {
+                                tracing::warn!(
+                                    step = &step_name,
+                                    error = %err,
+                                    "Failed to save error output"
+                                );
+                            }
+
                             state.add_result(
                                 &step_name,
-                                StepResult::failure(e.to_string(), 0),
+                                StepResult::failure(error_msg, 0),
                                 true,
                             );
                         }
                         Err(e) => {
+                            let error_msg = e.to_string();
+
+                            // Save error output before returning
+                            if let Err(err) =
+                                Self::save_step_output(&output_dir, &step_name, &error_msg, true)
+                            {
+                                tracing::warn!(
+                                    step = &step_name,
+                                    error = %err,
+                                    "Failed to save error output"
+                                );
+                            }
+
                             return Err(WorkflowError::StepFailed {
                                 step: step_name.clone(),
-                                message: e.to_string(),
+                                message: error_msg,
                             });
                         }
                     }
@@ -145,7 +268,14 @@ impl WorkflowRunner {
             }
         }
 
-        Ok(WorkflowResult::from_state(&state))
+        tracing::info!(
+            output_dir = %output_dir.display(),
+            "Workflow outputs saved"
+        );
+
+        let mut result = WorkflowResult::from_state(&state);
+        result.output_dir = Some(output_dir.to_string_lossy().to_string());
+        Ok(result)
     }
 
     /// Validate workflow before execution
