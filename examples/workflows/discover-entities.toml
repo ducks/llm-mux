@@ -1,0 +1,53 @@
+name = "discover-entities"
+description = "Discover structured entities with properties (uses normalized entity storage)"
+
+[[steps]]
+name = "analyze_project"
+type = "query"
+role = "ecosystem_analyzer"
+timeout = 240
+prompt = """
+Analyze the current project to discover entities and their properties.
+
+Look at:
+- Dependency files (Cargo.toml, package.json, Gemfile, go.mod, requirements.txt, etc.)
+- Configuration files
+- Key architectural components
+
+For each thing you discover, return structured entity data.
+
+IMPORTANT: Return JSON with this exact structure:
+{
+  "entities": [
+    {
+      "entity_type": "dependency|config|service|feature",
+      "entity_name": "name-of-thing",
+      "properties": {
+        "property_name": "property_value"
+      },
+      "source": "where-you-found-it",
+      "source_type": "file|config|analysis",
+      "confidence": 1.0
+    }
+  ]
+}
+
+Each entity MUST have:
+- entity_type: What kind of thing (dependency, config, service, feature)
+- entity_name: The name
+- properties: Object with key-value pairs describing it
+- source: Where you found this information
+- confidence: 0.0-1.0
+
+Common property names:
+- version: Version number or constraint
+- purpose: What it's used for
+- enabled: true/false for features
+- type: Type of config/service
+"""
+
+[[steps]]
+name = "store_entities"
+type = "store"
+depends_on = ["analyze_project"]
+prompt = "{{ steps.analyze_project.output }}"

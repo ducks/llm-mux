@@ -300,8 +300,7 @@ async fn execute_query_step(
 
     // If output_schema is present, append JSON formatting instructions
     if let Some(ref schema) = step.output_schema {
-        let schema_json = serde_json::to_string_pretty(schema)
-            .unwrap_or_else(|_| "{}".to_string());
+        let schema_json = serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_string());
 
         rendered_prompt.push_str(&format!(
             "\n\nIMPORTANT: You MUST respond with valid JSON matching this schema:\n```json\n{}\n```\n\nDo not include any text before or after the JSON object.",
@@ -336,24 +335,35 @@ async fn execute_query_step(
 fn strip_markdown_fences(output: &str) -> &str {
     let trimmed = output.trim();
 
+    // Strip backend headers (=== backend ===) if present
+    let without_header = if let Some(header_end) = trimmed.find("\n") {
+        if trimmed.starts_with("===") {
+            trimmed[header_end + 1..].trim()
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
     // Look for ```json fence anywhere in the output
-    if let Some(start_pos) = trimmed.find("```json") {
+    if let Some(start_pos) = without_header.find("```json") {
         // Find the closing ``` after the opening fence
-        if let Some(end_pos) = trimmed[start_pos + 7..].find("```") {
-            return trimmed[start_pos + 7..start_pos + 7 + end_pos].trim();
+        if let Some(end_pos) = without_header[start_pos + 7..].find("```") {
+            return without_header[start_pos + 7..start_pos + 7 + end_pos].trim();
         }
     }
 
     // Look for generic ``` fence anywhere in the output
-    if let Some(start_pos) = trimmed.find("```") {
+    if let Some(start_pos) = without_header.find("```") {
         // Find the closing ``` after the opening fence
-        if let Some(end_pos) = trimmed[start_pos + 3..].find("```") {
-            return trimmed[start_pos + 3..start_pos + 3 + end_pos].trim();
+        if let Some(end_pos) = without_header[start_pos + 3..].find("```") {
+            return without_header[start_pos + 3..start_pos + 3 + end_pos].trim();
         }
     }
 
     // No fences found, return as-is
-    trimmed
+    without_header
 }
 
 /// Validate JSON output against a schema
@@ -362,12 +372,13 @@ fn validate_json_schema(output: &str, schema: &crate::config::OutputSchema) -> R
     let clean_output = strip_markdown_fences(output);
 
     // Parse the output as JSON
-    let json: serde_json::Value = serde_json::from_str(clean_output)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(clean_output).map_err(|e| format!("Invalid JSON: {}", e))?;
 
     // Check that it's an object if schema_type is "object"
     if schema.schema_type == "object" {
-        let obj = json.as_object()
+        let obj = json
+            .as_object()
             .ok_or_else(|| "Expected object, got something else".to_string())?;
 
         // Check required fields
@@ -389,7 +400,10 @@ fn validate_json_schema(output: &str, schema: &crate::config::OutputSchema) -> R
 }
 
 /// Validate a property value against its schema
-fn validate_property_type(value: &serde_json::Value, schema: &crate::config::PropertySchema) -> Result<(), String> {
+fn validate_property_type(
+    value: &serde_json::Value,
+    schema: &crate::config::PropertySchema,
+) -> Result<(), String> {
     match schema.prop_type.as_str() {
         "string" => {
             if !value.is_string() {
@@ -407,7 +421,8 @@ fn validate_property_type(value: &serde_json::Value, schema: &crate::config::Pro
             }
         }
         "array" => {
-            let arr = value.as_array()
+            let arr = value
+                .as_array()
                 .ok_or_else(|| format!("Expected array, got {:?}", value))?;
 
             // If items schema is present, validate each item
@@ -561,7 +576,7 @@ async fn execute_store_step(
 
 /// Parse JSON output from LLM and store in SQLite memory database
 fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::Error> {
-    use crate::memory::{EcosystemMemory, Fact, ProjectRelationship};
+    use crate::memory::{EcosystemMemory, Entity, EntityProperty, Fact, ProjectRelationship};
 
     // Parse JSON
     let parsed: serde_json::Value = serde_json::from_str(json_data)?;
@@ -572,6 +587,7 @@ fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::E
 
     let mut facts_stored = 0;
     let mut relationships_stored = 0;
+    let mut entities_stored = 0;
 
     // Store facts if present
     if let Some(facts_array) = parsed.get("facts").and_then(|v| v.as_array()) {
@@ -639,10 +655,75 @@ fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::E
         }
     }
 
+    // Store entities if present
+    if let Some(entities_array) = parsed.get("entities").and_then(|v| v.as_array()) {
+        for entity_json in entities_array {
+            if let (Some(entity_type), Some(entity_name), Some(source)) = (
+                entity_json.get("entity_type").and_then(|v| v.as_str()),
+                entity_json.get("entity_name").and_then(|v| v.as_str()),
+                entity_json.get("source").and_then(|v| v.as_str()),
+            ) {
+                let project = entity_json
+                    .get("project")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let source_type = entity_json
+                    .get("source_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let confidence = entity_json
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0);
+
+                // Get or create the entity
+                let entity = Entity {
+                    id: None,
+                    ecosystem: ecosystem.to_string(),
+                    project: project.to_string(),
+                    entity_type: entity_type.to_string(),
+                    entity_name: entity_name.to_string(),
+                    created_at: String::new(),
+                };
+                let entity_id = memory.get_or_create_entity(&entity)?;
+
+                // Store each property
+                if let Some(properties) = entity_json.get("properties").and_then(|v| v.as_object())
+                {
+                    for (prop_name, prop_value) in properties {
+                        let prop_value_str = match prop_value {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            other => other.to_string(),
+                        };
+
+                        let property = EntityProperty {
+                            id: None,
+                            entity_id,
+                            property_name: prop_name.clone(),
+                            property_value: prop_value_str,
+                            source: source.to_string(),
+                            source_type: source_type.clone(),
+                            confidence,
+                            valid_from: String::new(),
+                            valid_to: None,
+                            created_at: String::new(),
+                        };
+                        memory.set_entity_property(&property)?;
+                    }
+                }
+
+                entities_stored += 1;
+            }
+        }
+    }
+
     Ok(format!(
-        "Stored {} facts and {} relationships in {}",
+        "Stored {} facts, {} relationships, and {} entities in {}",
         facts_stored,
         relationships_stored,
+        entities_stored,
         db_path.display()
     ))
 }

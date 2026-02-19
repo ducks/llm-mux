@@ -253,7 +253,10 @@ impl WorkflowConfig {
                 }
                 StepType::Store => {
                     if step.prompt.is_none() {
-                        errors.push(format!("store step '{}' missing 'prompt' field (use for input data)", step.name));
+                        errors.push(format!(
+                            "store step '{}' missing 'prompt' field (use for input data)",
+                            step.name
+                        ));
                     }
                 }
             }

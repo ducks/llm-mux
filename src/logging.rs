@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize logging based on output mode and debug flag
 pub fn init_logging(debug: bool, quiet: bool, log_file: Option<PathBuf>) -> anyhow::Result<()> {

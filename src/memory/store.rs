@@ -403,7 +403,12 @@ impl EcosystemMemory {
             .query_row(
                 "SELECT id FROM entities
                  WHERE ecosystem = ?1 AND project = ?2 AND entity_type = ?3 AND entity_name = ?4",
-                (&entity.ecosystem, &entity.project, &entity.entity_type, &entity.entity_name),
+                (
+                    &entity.ecosystem,
+                    &entity.project,
+                    &entity.entity_type,
+                    &entity.entity_name,
+                ),
                 |row| row.get(0),
             )
             .optional()?;
@@ -645,7 +650,10 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].workflow_name, "bug-hunt");
         assert!(runs[0].success);
-        assert_eq!(runs[0].output_dir, Some("/tmp/workflows/bug-hunt-123".into()));
+        assert_eq!(
+            runs[0].output_dir,
+            Some("/tmp/workflows/bug-hunt-123".into())
+        );
     }
 
     #[test]

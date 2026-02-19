@@ -48,13 +48,14 @@ impl WorkflowRunner {
         let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let dir_name = format!("{}-{}", workflow_name, timestamp);
 
-        let output_dir = std::env::temp_dir().join("llm-mux").join("workflows").join(dir_name);
+        let output_dir = std::env::temp_dir()
+            .join("llm-mux")
+            .join("workflows")
+            .join(dir_name);
 
-        std::fs::create_dir_all(&output_dir).map_err(|e| {
-            WorkflowError::StepFailed {
-                step: "create_output_dir".into(),
-                message: format!("Failed to create output directory: {}", e),
-            }
+        std::fs::create_dir_all(&output_dir).map_err(|e| WorkflowError::StepFailed {
+            step: "create_output_dir".into(),
+            message: format!("Failed to create output directory: {}", e),
         })?;
 
         tracing::info!(path = %output_dir.display(), "Created workflow output directory");
@@ -238,11 +239,7 @@ impl WorkflowRunner {
                                 );
                             }
 
-                            state.add_result(
-                                &step_name,
-                                StepResult::failure(error_msg, 0),
-                                true,
-                            );
+                            state.add_result(&step_name, StepResult::failure(error_msg, 0), true);
                         }
                         Err(e) => {
                             let error_msg = e.to_string();

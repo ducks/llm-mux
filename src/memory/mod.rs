@@ -4,4 +4,6 @@ mod schema;
 mod store;
 
 #[allow(unused_imports)]
-pub use store::{EcosystemMemory, Fact, Finding, ProjectRelationship, WorkflowRun};
+pub use store::{
+    EcosystemMemory, Entity, EntityProperty, Fact, Finding, ProjectRelationship, WorkflowRun,
+};
