@@ -77,6 +77,42 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_ecosystem ON workflow_runs(ecosystem);
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_name);
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at);
+
+        -- Normalized entity storage with history tracking
+        CREATE TABLE IF NOT EXISTS entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ecosystem TEXT NOT NULL,
+            project TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(ecosystem, project, entity_type, entity_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entities_ecosystem ON entities(ecosystem);
+        CREATE INDEX IF NOT EXISTS idx_entities_project ON entities(project);
+        CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+        CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(entity_name);
+
+        CREATE TABLE IF NOT EXISTS entity_properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL,
+            property_name TEXT NOT NULL,
+            property_value TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_type TEXT,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            valid_from TEXT NOT NULL,
+            valid_to TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(entity_id, property_name, valid_from),
+            FOREIGN KEY(entity_id) REFERENCES entities(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_properties_entity ON entity_properties(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_properties_name ON entity_properties(property_name);
+        CREATE INDEX IF NOT EXISTS idx_properties_current ON entity_properties(entity_id, property_name, valid_to);
+        CREATE INDEX IF NOT EXISTS idx_properties_valid_from ON entity_properties(valid_from);
         "#,
     )?;
 
@@ -105,5 +141,7 @@ mod tests {
         assert!(tables.contains(&"project_relationships".to_string()));
         assert!(tables.contains(&"findings".to_string()));
         assert!(tables.contains(&"workflow_runs".to_string()));
+        assert!(tables.contains(&"entities".to_string()));
+        assert!(tables.contains(&"entity_properties".to_string()));
     }
 }

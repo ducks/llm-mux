@@ -4,7 +4,7 @@
 
 use super::schema::init_schema;
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 /// A fact about the ecosystem
@@ -61,6 +61,32 @@ pub struct WorkflowRun {
     pub failed_step: Option<String>,
     pub error_message: Option<String>,
     pub output_dir: Option<String>,
+    pub created_at: String,
+}
+
+/// An entity in the ecosystem (dependency, service, config, etc.)
+#[derive(Debug, Clone)]
+pub struct Entity {
+    pub id: Option<i64>,
+    pub ecosystem: String,
+    pub project: String,
+    pub entity_type: String,
+    pub entity_name: String,
+    pub created_at: String,
+}
+
+/// A property of an entity with history tracking
+#[derive(Debug, Clone)]
+pub struct EntityProperty {
+    pub id: Option<i64>,
+    pub entity_id: i64,
+    pub property_name: String,
+    pub property_value: String,
+    pub source: String,
+    pub source_type: Option<String>,
+    pub confidence: f64,
+    pub valid_from: String,
+    pub valid_to: Option<String>,
     pub created_at: String,
 }
 
@@ -368,6 +394,180 @@ impl EcosystemMemory {
 
         Ok(runs)
     }
+
+    /// Get or create an entity
+    pub fn get_or_create_entity(&mut self, entity: &Entity) -> Result<i64> {
+        // Try to find existing entity
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM entities
+                 WHERE ecosystem = ?1 AND project = ?2 AND entity_type = ?3 AND entity_name = ?4",
+                (&entity.ecosystem, &entity.project, &entity.entity_type, &entity.entity_name),
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        // Create new entity
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO entities (ecosystem, project, entity_type, entity_name, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                &entity.ecosystem,
+                &entity.project,
+                &entity.entity_type,
+                &entity.entity_name,
+                &now,
+            ),
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Add or update an entity property (with history tracking)
+    pub fn set_entity_property(&mut self, property: &EntityProperty) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Check if there's a current property with the same value
+        let existing: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, property_value FROM entity_properties
+                 WHERE entity_id = ?1 AND property_name = ?2 AND valid_to IS NULL",
+                (property.entity_id, &property.property_name),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        if let Some((existing_id, existing_value)) = existing {
+            // If value hasn't changed, just return existing ID
+            if existing_value == property.property_value {
+                return Ok(existing_id);
+            }
+
+            // Value changed - close out the old property
+            self.conn.execute(
+                "UPDATE entity_properties SET valid_to = ?1 WHERE id = ?2",
+                (&now, existing_id),
+            )?;
+        }
+
+        // Insert new property value
+        self.conn.execute(
+            "INSERT INTO entity_properties
+             (entity_id, property_name, property_value, source, source_type, confidence, valid_from, valid_to, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
+            (
+                property.entity_id,
+                &property.property_name,
+                &property.property_value,
+                &property.source,
+                &property.source_type,
+                property.confidence,
+                &now,
+                &now,
+            ),
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get current properties for an entity
+    pub fn get_entity_properties(&self, entity_id: i64) -> Result<Vec<EntityProperty>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, entity_id, property_name, property_value, source, source_type, confidence, valid_from, valid_to, created_at
+             FROM entity_properties
+             WHERE entity_id = ?1 AND valid_to IS NULL
+             ORDER BY property_name",
+        )?;
+
+        let properties = stmt
+            .query_map([entity_id], |row| {
+                Ok(EntityProperty {
+                    id: Some(row.get(0)?),
+                    entity_id: row.get(1)?,
+                    property_name: row.get(2)?,
+                    property_value: row.get(3)?,
+                    source: row.get(4)?,
+                    source_type: row.get(5)?,
+                    confidence: row.get(6)?,
+                    valid_from: row.get(7)?,
+                    valid_to: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(properties)
+    }
+
+    /// Get property history for an entity
+    pub fn get_entity_property_history(
+        &self,
+        entity_id: i64,
+        property_name: &str,
+    ) -> Result<Vec<EntityProperty>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, entity_id, property_name, property_value, source, source_type, confidence, valid_from, valid_to, created_at
+             FROM entity_properties
+             WHERE entity_id = ?1 AND property_name = ?2
+             ORDER BY valid_from DESC",
+        )?;
+
+        let properties = stmt
+            .query_map([&entity_id.to_string(), property_name], |row| {
+                Ok(EntityProperty {
+                    id: Some(row.get(0)?),
+                    entity_id: row.get(1)?,
+                    property_name: row.get(2)?,
+                    property_value: row.get(3)?,
+                    source: row.get(4)?,
+                    source_type: row.get(5)?,
+                    confidence: row.get(6)?,
+                    valid_from: row.get(7)?,
+                    valid_to: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(properties)
+    }
+
+    /// Get entities by type
+    pub fn get_entities_by_type(
+        &self,
+        ecosystem: &str,
+        project: &str,
+        entity_type: &str,
+    ) -> Result<Vec<Entity>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ecosystem, project, entity_type, entity_name, created_at
+             FROM entities
+             WHERE ecosystem = ?1 AND project = ?2 AND entity_type = ?3
+             ORDER BY entity_name",
+        )?;
+
+        let entities = stmt
+            .query_map([ecosystem, project, entity_type], |row| {
+                Ok(Entity {
+                    id: Some(row.get(0)?),
+                    ecosystem: row.get(1)?,
+                    project: row.get(2)?,
+                    entity_type: row.get(3)?,
+                    entity_name: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entities)
+    }
 }
 
 #[cfg(test)]
@@ -446,5 +646,112 @@ mod tests {
         assert_eq!(runs[0].workflow_name, "bug-hunt");
         assert!(runs[0].success);
         assert_eq!(runs[0].output_dir, Some("/tmp/workflows/bug-hunt-123".into()));
+    }
+
+    #[test]
+    fn test_entity_property_tracking() {
+        let mut memory = EcosystemMemory::open(Path::new(":memory:")).unwrap();
+
+        // Create entity
+        let entity = Entity {
+            id: None,
+            ecosystem: "test".into(),
+            project: "discourse".into(),
+            entity_type: "dependency".into(),
+            entity_name: "rails".into(),
+            created_at: String::new(),
+        };
+
+        let entity_id = memory.get_or_create_entity(&entity).unwrap();
+
+        // Add version property
+        let prop1 = EntityProperty {
+            id: None,
+            entity_id,
+            property_name: "version".into(),
+            property_value: "8.0".into(),
+            source: "Gemfile".into(),
+            source_type: Some("file".into()),
+            confidence: 1.0,
+            valid_from: String::new(),
+            valid_to: None,
+            created_at: String::new(),
+        };
+
+        memory.set_entity_property(&prop1).unwrap();
+
+        // Check current properties
+        let properties = memory.get_entity_properties(entity_id).unwrap();
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].property_name, "version");
+        assert_eq!(properties[0].property_value, "8.0");
+        assert!(properties[0].valid_to.is_none());
+
+        // Update version
+        let prop2 = EntityProperty {
+            id: None,
+            entity_id,
+            property_name: "version".into(),
+            property_value: "8.1".into(),
+            source: "Gemfile".into(),
+            source_type: Some("file".into()),
+            confidence: 1.0,
+            valid_from: String::new(),
+            valid_to: None,
+            created_at: String::new(),
+        };
+
+        memory.set_entity_property(&prop2).unwrap();
+
+        // Check current properties show new version
+        let properties = memory.get_entity_properties(entity_id).unwrap();
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].property_value, "8.1");
+        assert!(properties[0].valid_to.is_none());
+
+        // Check history shows both versions
+        let history = memory
+            .get_entity_property_history(entity_id, "version")
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].property_value, "8.1"); // Most recent first
+        assert!(history[0].valid_to.is_none());
+        assert_eq!(history[1].property_value, "8.0");
+        assert!(history[1].valid_to.is_some()); // Old version is closed out
+    }
+
+    #[test]
+    fn test_get_entities_by_type() {
+        let mut memory = EcosystemMemory::open(Path::new(":memory:")).unwrap();
+
+        // Add multiple dependencies
+        let rails = Entity {
+            id: None,
+            ecosystem: "test".into(),
+            project: "discourse".into(),
+            entity_type: "dependency".into(),
+            entity_name: "rails".into(),
+            created_at: String::new(),
+        };
+
+        let postgres = Entity {
+            id: None,
+            ecosystem: "test".into(),
+            project: "discourse".into(),
+            entity_type: "dependency".into(),
+            entity_name: "postgresql".into(),
+            created_at: String::new(),
+        };
+
+        memory.get_or_create_entity(&rails).unwrap();
+        memory.get_or_create_entity(&postgres).unwrap();
+
+        // Query dependencies
+        let deps = memory
+            .get_entities_by_type("test", "discourse", "dependency")
+            .unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|e| e.entity_name == "rails"));
+        assert!(deps.iter().any(|e| e.entity_name == "postgresql"));
     }
 }
