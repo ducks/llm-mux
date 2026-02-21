@@ -1,0 +1,75 @@
+name = "query-knowledge"
+description = "Query the learned knowledge base and synthesize insights"
+
+[args.question]
+required = true
+description = "Question to ask about learned patterns and knowledge"
+
+[args.db]
+required = true
+description = "Database name to query (e.g., 'myproject')"
+
+[[steps]]
+name = "get_patterns"
+type = "shell"
+timeout = 30000
+run = """
+cd ~/dev/llm-mux && nix-shell --run "sqlite3 ~/.config/llm-mux/memory/{{ args.db }}.db <<'SQL'
+.mode json
+SELECT
+  e.entity_name,
+  e.entity_type,
+  json_group_object(p.property_name, p.property_value) as properties
+FROM entities e
+LEFT JOIN entity_properties p ON e.id = p.entity_id
+WHERE e.entity_type IN ('pattern', 'convention', 'component')
+GROUP BY e.id, e.entity_name, e.entity_type
+ORDER BY e.entity_type, e.entity_name;
+SQL
+"
+"""
+
+[[steps]]
+name = "get_relationships"
+type = "shell"
+timeout = 30000
+run = """
+cd ~/dev/llm-mux && nix-shell --run "sqlite3 ~/.config/llm-mux/memory/{{ args.db }}.db <<'SQL'
+.mode json
+SELECT
+  from_project,
+  to_project,
+  relationship_type,
+  metadata
+FROM project_relationships;
+SQL
+"
+"""
+
+[[steps]]
+name = "analyze"
+type = "query"
+role = "analyzer"
+depends_on = ["get_patterns", "get_relationships"]
+timeout = 120000
+prompt = """
+You have access to a knowledge base learned from analyzing PRs.
+
+User Question: {{ args.question }}
+
+Available Knowledge:
+
+## Patterns, Conventions, and Components
+{{ steps.get_patterns.output }}
+
+## Relationships
+{{ steps.get_relationships.output }}
+
+Analyze the knowledge base and answer the user's question. Provide:
+1. Direct answer to their question
+2. Relevant patterns/conventions that apply
+3. Specific examples from the knowledge base
+4. Actionable recommendations
+
+If the question relates to how to implement something, suggest which patterns to follow and what files typically need changes.
+"""

@@ -1,0 +1,97 @@
+name = "learn-from-pr"
+description = "Learn patterns from a GitHub PR by analyzing what changed and why"
+
+[args.pr]
+required = true
+description = "PR number to analyze"
+
+[[steps]]
+name = "fetch_pr"
+type = "shell"
+timeout = 30000
+run = "gh pr view {{ args.pr }} --json title,body,files,labels,author,mergedAt"
+
+[[steps]]
+name = "analyze_changes"
+type = "query"
+role = "analyzer"
+depends_on = ["fetch_pr"]
+timeout = 240000
+prompt = """
+Analyze this PR to extract learnable patterns.
+
+PR Data:
+{{ steps.fetch_pr.output }}
+
+Use available tools to examine the actual code changes if needed (read files, grep patterns, etc).
+
+Extract patterns like:
+- What type of change was this? (bug fix, feature, refactor, performance, security)
+- What files were modified together? (common file groupings)
+- What conventions were followed?
+- What architectural patterns were used?
+- Any interesting relationships between components?
+
+Return structured data in JSON format:
+{
+  "pr_metadata": {
+    "pr_number": "number",
+    "pr_type": "bug|feature|refactor|performance|security",
+    "title": "title",
+    "merged_at": "date"
+  },
+  "patterns": [
+    {
+      "pattern_type": "file_group|convention|architecture|testing",
+      "description": "what pattern you observed",
+      "files_involved": ["list", "of", "files"],
+      "confidence": 0.9
+    }
+  ],
+  "entities": [
+    {
+      "entity_type": "component|pattern|convention",
+      "entity_name": "name",
+      "properties": {
+        "purpose": "what it does",
+        "related_to": ["other", "entities"]
+      },
+      "source": "PR #{{ args.pr }}",
+      "confidence": 1.0
+    }
+  ],
+  "relationships": [
+    {
+      "from_entity": "entity1",
+      "to_entity": "entity2",
+      "relationship_type": "depends_on|modifies|tests|implements",
+      "context": "why they're related"
+    }
+  ]
+}
+"""
+
+[[steps]]
+name = "store_patterns"
+type = "store"
+depends_on = ["analyze_changes"]
+prompt = "{{ steps.analyze_changes.output }}"
+
+[[steps]]
+name = "summarize"
+type = "query"
+role = "synthesizer"
+depends_on = ["store_patterns"]
+timeout = 60000
+prompt = """
+Based on the analysis, provide a brief summary of what was learned.
+
+Analysis:
+{{ steps.analyze_changes.output }}
+
+Summarize:
+- What type of change was this?
+- Key patterns observed
+- How many entities/relationships were stored
+- What can be applied to future similar changes
+"""
