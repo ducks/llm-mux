@@ -154,13 +154,26 @@ pub async fn run_workflow(
         steps_completed: result.steps.len(),
     });
 
-    // Output final result
+    // Output final result - try common final step names first, then fallback
     let final_output = result
         .steps
-        .values()
-        .filter_map(|s| s.output.as_ref())
-        .last()
-        .map(|s| s.as_str());
+        .get("generate_report")
+        .and_then(|s| s.output.as_deref())
+        .or_else(|| {
+            result
+                .steps
+                .get("synthesize")
+                .and_then(|s| s.output.as_deref())
+        })
+        .or_else(|| result.steps.get("final").and_then(|s| s.output.as_deref()))
+        .or_else(|| {
+            // Fallback: get any step with output (last by hash iteration)
+            result
+                .steps
+                .values()
+                .filter_map(|s| s.output.as_deref())
+                .last()
+        });
 
     // Write to file if specified
     if let Some(path) = output_file {
@@ -177,6 +190,20 @@ pub async fn run_workflow(
     }
 
     handler.result(result.success, final_output);
+
+    // Always write final output to console AND file if present
+    if let Some(output) = final_output {
+        eprintln!("\n=== Workflow Output ===");
+        println!("{}", output);
+
+        // ALWAYS write to a temp file so we don't lose reports
+        let report_file = format!("/tmp/llm-mux-{}-report.txt", workflow_name);
+        if let Err(e) = std::fs::write(&report_file, output) {
+            eprintln!("Warning: Failed to write report to {}: {}", report_file, e);
+        } else {
+            eprintln!("\nReport saved to: {}", report_file);
+        }
+    }
 
     Ok(if result.success { 0 } else { 1 })
 }

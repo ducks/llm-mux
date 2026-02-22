@@ -1,0 +1,248 @@
+# Production Alert Investigation Workflow
+#
+# This workflow demonstrates automated incident investigation for 5xx error alerts.
+# It shows how to:
+# - Fetch logs from remote servers via SSH
+# - Extract code references (files, classes, methods) from error logs using AI
+# - Investigate your codebase for the referenced code
+# - Generate structured incident reports with root cause analysis
+#
+# NOTE: Adapt the SSH/container commands for your infrastructure.
+# This example uses a Rails app but the pattern works for any web application.
+
+name = "investigate-5xx-alert"
+description = "Investigate high 5xx error rate alerts by checking logs, queues, and code"
+
+[args.cluster]
+required = true
+description = "Cluster name from the alert (e.g., epic-prod-us2)"
+
+[args.alert_time]
+required = false
+description = "Alert timestamp (ISO 8601 format, defaults to now)"
+
+[[steps]]
+name = "get_cluster_info"
+type = "shell"
+timeout = 30000
+run = """
+# Get cluster/server configuration
+# CUSTOMIZE: Replace with your infrastructure config lookup
+echo "=== Cluster Configuration ==="
+echo "Cluster: {{ args.cluster }}"
+echo "Investigating production server for 5xx errors"
+"""
+
+[[steps]]
+name = "check_discourse_logs"
+type = "shell"
+timeout = 60000
+depends_on = ["get_cluster_info"]
+run = """
+echo "=== Recent 5xx Errors from Production Logs ==="
+# CUSTOMIZE: Replace with your log access method (ssh, kubectl logs, etc.)
+# This example searches JSON logs for 5xx status codes
+#
+# Example for SSH to server:
+# ssh {{ args.cluster }} 'grep -E "\"status\":5[0-9][0-9]" /var/log/app/production.log | tail -20'
+#
+# Example for Kubernetes:
+# kubectl logs -n production {{ args.cluster }} --tail=50000 | grep -E "\"status\":5[0-9][0-9]" | tail -20
+#
+echo "Sample command - customize for your infrastructure"
+echo "No 5xx errors found (template workflow)"
+"""
+
+[[steps]]
+name = "check_queue_status"
+type = "shell"
+timeout = 30000
+depends_on = ["get_cluster_info"]
+run = """
+echo "=== Background Queue Status ==="
+# CUSTOMIZE: Check your background job queue health
+# Examples:
+# - Sidekiq: ssh {{ args.cluster }} 'cd /app && bundle exec rails runner "puts Sidekiq::Stats.new.inspect"'
+# - Celery: ssh {{ args.cluster }} 'celery -A myapp inspect stats'
+# - Bull: kubectl exec {{ args.cluster }} -- node -e "require('./queue').getStats()"
+#
+echo "Queue status check - customize for your infrastructure"
+echo "Queue: healthy (template workflow)"
+"""
+
+[[steps]]
+name = "search_related_alerts"
+type = "shell"
+timeout = 30000
+run = """
+# Search knowledge base for similar 5xx alert patterns
+echo "=== Related Alert Patterns from Knowledge Base ==="
+sqlite3 ~/.config/llm-mux/memory/discourse.db "SELECT entity_name, json_extract(properties, '$.purpose') FROM entities WHERE entity_type IN ('alert_pattern', 'pattern') AND (entity_name LIKE '%5xx%' OR entity_name LIKE '%error%' OR json_extract(properties, '$.purpose') LIKE '%error%')" 2>/dev/null || echo "No related patterns found"
+"""
+
+[[steps]]
+name = "extract_code_references"
+type = "query"
+role = "analyzer"
+depends_on = ["check_discourse_logs"]
+timeout = 30000
+prompt = """
+Analyze these 5xx error logs and extract any code references (file paths, controller names, method names, class names):
+
+{{ steps.check_discourse_logs.output }}
+
+Extract and list:
+1. File paths (e.g., app/controllers/users_controller.rb, plugins/discourse-ai/lib/completions.rb)
+2. Controller#action pairs (e.g., UsersController#show)
+3. Class names that appear in error messages
+4. Method names mentioned in stack traces
+
+Output ONLY a JSON array of strings with the code references found. If none found, output an empty array.
+
+Example output format:
+A JSON array with file paths, controller names, or method names as strings.
+"""
+
+[[steps]]
+name = "investigate_code"
+type = "shell"
+timeout = 60000
+depends_on = ["extract_code_references"]
+run = """
+echo "=== Code Investigation ==="
+CODE_REFS='{{ steps.extract_code_references.output }}'
+
+# CUSTOMIZE: Replace with your codebase path
+CODEBASE_PATH="$HOME/your-app"
+
+# Check if we got any code references
+if echo "$CODE_REFS" | grep -q '\\[.*\\]'; then
+  echo "$CODE_REFS" | grep -o '"[^"]*"' | sed 's/"//g' | while read -r ref; do
+    echo "--- Investigating: $ref ---"
+
+    # If it's a file path, show the file
+    if echo "$ref" | grep -q '/'; then
+      FILE_PATH="$ref"
+      if [ -f "$CODEBASE_PATH/$FILE_PATH" ]; then
+        echo "File found:"
+        head -50 "$CODEBASE_PATH/$FILE_PATH"
+      else
+        echo "Searching for similar files:"
+        find "$CODEBASE_PATH" -name "$(basename $FILE_PATH)" 2>/dev/null | head -3
+      fi
+    else
+      # It's a class/method name, search for it
+      echo "Searching codebase for: $ref"
+      rg "$ref" "$CODEBASE_PATH" --max-count 5 2>/dev/null || echo "Not found"
+    fi
+    echo ""
+  done
+else
+  echo "No code references extracted from error logs"
+fi
+"""
+
+[[steps]]
+name = "analyze_patterns"
+type = "query"
+role = "analyzer"
+depends_on = ["get_cluster_info", "check_discourse_logs", "check_sidekiq_status", "search_related_alerts", "investigate_code"]
+timeout = 120000
+prompt = """
+You are investigating a high 5xx error rate alert for cluster {{ args.cluster }}.
+
+## Alert Context
+A high 5xx error rate was detected. Common causes include:
+- Application overloading (queueing, traffic spikes)
+- Plugin code problems (recent deploy)
+- Database issues (timeouts, connection errors)
+- Attack traffic (DoS attempts)
+
+Note: This alert has a 12-minute lag due to Cloudwatch scraping.
+
+## Cluster Configuration
+{{ steps.get_cluster_info.output }}
+
+## Recent Application Logs (errors/warnings)
+{{ steps.check_discourse_logs.output }}
+
+## Sidekiq Queue Status
+{{ steps.check_sidekiq_status.output }}
+
+## Related Patterns from Knowledge Base
+{{ steps.search_related_alerts.output }}
+
+## Code Investigation
+{{ steps.investigate_code.output }}
+
+## Investigation Analysis
+
+Based on the logs, queue status, and code investigation, provide:
+
+1. **Likely Root Cause**: What's causing the 5xx errors based on log evidence
+2. **Error Patterns**: What types of errors are showing up in logs
+3. **Queue Health**: Is sidekiq backed up or processing normally
+4. **Correlation**: Do the logs show recent changes or specific failing endpoints
+5. **Next Investigation Steps**: What additional commands to run with dssh
+6. **Immediate Actions**: What should be done right now to mitigate
+
+Be specific about:
+- Which errors appear most frequently in logs
+- Whether this looks like a code bug, infrastructure issue, or attack
+- What rails commands or dssh commands to run next
+- If code was investigated, explain what the code does and why it might be failing
+- Identify specific code paths or methods that may be causing the errors
+"""
+
+[[steps]]
+name = "generate_report"
+type = "query"
+role = "synthesizer"
+depends_on = ["analyze_patterns"]
+timeout = 60000
+prompt = """
+You are generating the FINAL incident report for an on-call engineer.
+
+INVESTIGATION ANALYSIS:
+{{ steps.analyze_patterns.output }}
+
+Create a structured incident report in markdown format with these exact sections:
+
+# Incident Report: {{ args.cluster }} 5xx Alert Investigation
+
+## Incident Summary
+(1-2 sentences describing the issue and current status)
+
+## Evidence
+(Key findings from logs, Sidekiq, and code investigation)
+
+## Root Cause Analysis
+(Most likely cause based on evidence, with confidence level)
+
+## Immediate Actions Required
+(Specific commands or actions to take right now)
+
+## Recommended Next Steps
+1. (Further investigation)
+2. (Monitoring)
+3. (Long-term fixes)
+
+## Investigation Commands
+```bash
+# Specific dssh/mothership commands for deeper investigation
+```
+
+Make it actionable, specific, and ready for an engineer to act on immediately.
+"""
+
+[[steps]]
+name = "save_report"
+type = "shell"
+timeout = 5000
+depends_on = ["generate_report"]
+run = """
+cat > /tmp/investigate-5xx-alert-{{ args.cluster }}.md << 'REPORT_EOF'
+{{ steps.generate_report.output }}
+REPORT_EOF
+echo "Report saved to: /tmp/investigate-5xx-alert-{{ args.cluster }}.md"
+"""
