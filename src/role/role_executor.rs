@@ -161,6 +161,10 @@ impl RoleExecutor {
     ) -> Result<RoleResult, ExecutionError> {
         let start = Instant::now();
 
+        // Limit concurrency if configured (default: unlimited)
+        let max_concurrent = self.config.defaults.max_concurrent.unwrap_or(u32::MAX);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize));
+
         // Create futures for all backends
         let mut handles = Vec::new();
 
@@ -173,8 +177,10 @@ impl RoleExecutor {
                 let executor = create_executor_with_retry(backend_name, backend_config);
                 let request = request.clone();
                 let name = backend_name.clone();
+                let sem = semaphore.clone();
 
                 handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
                     let result = executor.execute(&request).await;
                     (name, result)
                 }));
