@@ -107,7 +107,7 @@ Later files override earlier ones.
 command = "claude"           # CLI command or HTTP URL
 args = ["-p"]                # arguments for CLI backends
 model = "gpt-4"              # model name for HTTP backends
-api_key = "${ENV_VAR}"       # API key (supports env vars)
+api_key = "${ENV_VAR}"       # API key; `${VAR}` placeholders expand at load
 enabled = true               # enable/disable
 timeout = 300                # seconds
 max_retries = 3              # retry attempts
@@ -115,6 +115,13 @@ retry_delay = 1000           # base delay in ms (exponential backoff)
 retry_rate_limit = true      # auto-retry on rate limits
 retry_timeout = false        # auto-retry on timeouts
 ```
+
+`api_key` supports `${VAR}` placeholders that are expanded against the
+process environment when the config is loaded. Multiple placeholders in
+one value are fine. Bare `$` characters (without `{`) pass through
+unchanged, so literal keys like `sk-abc123` also work. If a referenced
+variable is unset or empty, loading fails with a clear error rather than
+silently sending `Bearer ${VAR}` to the provider.
 
 ### Role Execution Modes
 

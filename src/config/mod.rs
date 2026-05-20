@@ -2,6 +2,7 @@
 
 mod backend;
 mod ecosystem;
+mod env_expand;
 mod error;
 mod loader;
 mod role;
