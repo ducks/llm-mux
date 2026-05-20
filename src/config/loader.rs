@@ -160,9 +160,27 @@ impl LlmuxConfig {
     pub fn load_file(path: &Path) -> Result<Self> {
         let contents =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let config: Self =
+        let mut config: Self =
             toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+        config
+            .expand_env_placeholders()
+            .with_context(|| format!("expanding env vars in {}", path.display()))?;
         Ok(config)
+    }
+
+    /// Expand `${VAR}` placeholders in backend `api_key` fields. The Claude
+    /// backend's separate `api_key_env` field is left alone — it's resolved
+    /// at backend-construction time, since it carries the env var name
+    /// rather than a placeholder string.
+    fn expand_env_placeholders(&mut self) -> Result<()> {
+        for (name, backend) in &mut self.backends {
+            if let Some(raw) = backend.api_key.as_deref() {
+                let expanded = super::env_expand::expand(raw)
+                    .with_context(|| format!("backend `{name}` api_key"))?;
+                backend.api_key = Some(expanded);
+            }
+        }
+        Ok(())
     }
 
     /// Get the user config path (~/.config/llm-mux/config.toml)
@@ -318,6 +336,79 @@ mod tests {
         assert_eq!(config.defaults.timeout, 60);
         assert!(config.backends.contains_key("claude"));
         assert!(config.backends.contains_key("codex"));
+    }
+
+    #[test]
+    fn test_load_expands_api_key_env_placeholder() {
+        // SAFETY: cargo test runs tests in parallel by default, but this
+        // variable name is unique enough that conflicts are unlikely.
+        unsafe {
+            std::env::set_var("LLM_MUX_LOADER_TEST_KEY", "sk-from-env");
+        }
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        writeln!(
+            file,
+            r#"
+            [backends.openai]
+            command = "https://api.openai.com/v1"
+            api_key = "${{LLM_MUX_LOADER_TEST_KEY}}"
+        "#
+        )
+        .unwrap();
+
+        let config = LlmuxConfig::load_file(&config_path).unwrap();
+        assert_eq!(
+            config.backends["openai"].api_key.as_deref(),
+            Some("sk-from-env")
+        );
+        unsafe {
+            std::env::remove_var("LLM_MUX_LOADER_TEST_KEY");
+        }
+    }
+
+    #[test]
+    fn test_load_fails_when_referenced_env_var_unset() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        writeln!(
+            file,
+            r#"
+            [backends.openai]
+            command = "https://api.openai.com/v1"
+            api_key = "${{LLM_MUX_LOADER_NEVER_SET_XYZ}}"
+        "#
+        )
+        .unwrap();
+
+        let err = LlmuxConfig::load_file(&config_path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("LLM_MUX_LOADER_NEVER_SET_XYZ"), "got: {msg}");
+        assert!(msg.contains("openai"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_load_passes_through_literal_api_key() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        writeln!(
+            file,
+            r#"
+            [backends.openai]
+            command = "https://api.openai.com/v1"
+            api_key = "sk-literal-12345"
+        "#
+        )
+        .unwrap();
+
+        let config = LlmuxConfig::load_file(&config_path).unwrap();
+        assert_eq!(
+            config.backends["openai"].api_key.as_deref(),
+            Some("sk-literal-12345")
+        );
     }
 
     #[test]
