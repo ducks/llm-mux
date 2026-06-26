@@ -1,68 +1,102 @@
 # llm-mux
 
-Multiplexer for LLMs. Route prompts to multiple backends, run them in parallel,
-and orchestrate multi-step workflows.
+**The Makefile for LLMs.**
 
-## Quick Start
+Just as Make orchestrates shell commands, llm-mux orchestrates LLM calls. Write a TOML workflow, run it with one command, get results from any model - or all of them at once.
 
-### 1. Install
+```toml
+# .llm-mux/workflows/review.toml
+name = "review"
 
-```bash
-# From crates.io
-cargo install llm-mux
+[[steps]]
+name = "diff"
+type = "shell"
+run = "git diff HEAD~1"
 
-# Or from source
-cargo install --path .
+[[steps]]
+name = "analyze"
+type = "query"
+role = "analyzer"       # runs Claude + Gemini in parallel
+prompt = "Review these changes:\n\n{{ steps.diff.output }}"
+depends_on = ["diff"]
+
+[[steps]]
+name = "fix"
+type = "apply"
+source = "analyze"
+verify = "cargo test"   # rolls back if tests fail
+depends_on = ["analyze"]
 ```
 
-### 2. Configure Backends
+```bash
+llm-mux run review
+```
+
+No SDK. No Python. No boilerplate. A single Rust binary, a config file, done.
+
+## Why llm-mux
+
+You have API keys for Claude, Gemini, and a local Ollama instance. Right now you're copy-pasting the same prompt into each one and manually merging the results. llm-mux removes that entirely.
+
+- **Route to multiple models at once** - run a role across Claude + Gemini in parallel, get both responses
+- **Chain steps together** - shell commands, LLM queries, file edits, and verification steps compose naturally
+- **Apply and verify** - LLM suggests edits, llm-mux applies them, runs your test suite, rolls back on failure
+- **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
+- **Works anywhere** - single binary, no runtime dependencies, runs in CI
+
+## Install
+
+```bash
+cargo install llm-mux
+```
+
+Or download a prebuilt binary from [releases](https://github.com/ducks/llm-mux/releases).
+
+## Setup
+
+### 1. Configure backends
 
 Create `~/.config/llm-mux/config.toml`:
 
 ```toml
-# CLI backends (any command that accepts a prompt)
 [backends.claude]
 command = "claude"
 args = ["-p"]
 
-[backends.codex]
-command = "codex"
-args = ["exec", "-q"]
+[backends.gemini]
+command = "npx"
+args = ["@google/gemini-cli", "-m", "gemini-2.0-flash"]
 
 [backends.ollama]
-command = "ollama"
-args = ["run", "llama3"]
-
-# HTTP backends (OpenAI-compatible APIs)
-[backends.openai]
-command = "https://api.openai.com/v1"
-model = "gpt-4"
-api_key = "${OPENAI_API_KEY}"  # from environment
-
-[backends.local]
 command = "http://localhost:11434/v1"
 model = "llama3"
+
+# Any OpenAI-compatible HTTP endpoint works
+[backends.openai]
+command = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = "${OPENAI_API_KEY}"
 ```
 
-### 3. Define Roles
+### 2. Define roles
 
-Roles map task types to backends:
+Roles map task types to one or more backends:
 
 ```toml
 [roles.analyzer]
-description = "Code analysis tasks"
-backends = ["claude", "codex"]
-execution = "parallel"  # first | parallel | fallback
+description = "Code analysis"
+backends = ["claude", "gemini"]
+execution = "parallel"    # first | parallel | fallback
 
 [roles.quick]
-description = "Fast responses"
+description = "Fast local queries"
 backends = ["ollama"]
 execution = "first"
 ```
 
-### 4. Create a Workflow
+### 3. Create a workflow
 
-Create `.llm-mux/workflows/review.toml` in your project:
+Workflows live in `.llm-mux/workflows/` (project) or `~/.config/llm-mux/workflows/` (global):
 
 ```toml
 name = "review"
@@ -78,322 +112,173 @@ name = "analyze"
 type = "query"
 role = "analyzer"
 prompt = """
-Review these changes for bugs and improvements:
+Review these changes for bugs, security issues, and improvements:
 
 {{ steps.diff.output }}
 """
 depends_on = ["diff"]
 ```
 
-### 5. Run It
+### 4. Run
 
 ```bash
 llm-mux run review
+llm-mux run review --dry-run    # preview without executing
 ```
 
-## Configuration
+## Workflow Steps
 
-### Config Locations
-
-1. `~/.config/llm-mux/config.toml` (user defaults)
-2. `.llm-mux/config.toml` (project overrides)
-
-Later files override earlier ones.
-
-### Backend Options
+### shell - run a command
 
 ```toml
-[backends.example]
-command = "claude"           # CLI command or HTTP URL
-args = ["-p"]                # arguments for CLI backends
-model = "gpt-4"              # model name for HTTP backends
-api_key = "${ENV_VAR}"       # API key; `${VAR}` placeholders expand at load
-enabled = true               # enable/disable
-timeout = 300                # seconds
-max_retries = 3              # retry attempts
-retry_delay = 1000           # base delay in ms (exponential backoff)
-retry_rate_limit = true      # auto-retry on rate limits
-retry_timeout = false        # auto-retry on timeouts
-```
-
-`api_key` supports `${VAR}` placeholders that are expanded against the
-process environment when the config is loaded. Multiple placeholders in
-one value are fine. Bare `$` characters (without `{`) pass through
-unchanged, so literal keys like `sk-abc123` also work. If a referenced
-variable is unset or empty, loading fails with a clear error rather than
-silently sending `Bearer ${VAR}` to the provider.
-
-### Role Execution Modes
-
-- `first`: Use first available backend (default)
-- `parallel`: Run all backends, collect results
-- `fallback`: Try each backend until one succeeds
-
-### Teams
-
-Auto-detect project type and apply team-specific settings:
-
-```toml
-[teams.rust]
-description = "Rust projects"
-detect = ["Cargo.toml"]
-verify = "cargo clippy && cargo test"
-
-[teams.rust.roles.analyzer]
-backends = ["claude", "codex"]  # override for Rust projects
-```
-
-### Ecosystems
-
-Track relationships between projects and store ecosystem knowledge:
-
-```toml
-[ecosystems.myapp]
-description = "MyApp web application and services"
-knowledge = [
-    "API uses JWT tokens with 1 hour expiration",
-    "Database migrations run automatically on deploy",
-    "Redis cache invalidation happens via pub/sub"
-]
-
-[ecosystems.myapp.projects.frontend]
-path = "~/projects/myapp-frontend"
-type = "javascript"
-depends_on = ["api"]
-tags = ["production", "web"]
-
-[ecosystems.myapp.projects.api]
-description = "REST API backend"
-path = "~/projects/myapp-api"
-type = "rust"
-depends_on = ["database"]
-tags = ["production", "backend"]
-
-[ecosystems.myapp.projects.database]
-description = "PostgreSQL database with migrations"
-path = "~/projects/myapp-db"
-type = "sql"
-tags = ["infrastructure", "database"]
-
-[ecosystems.myapp.projects.worker]
-description = "Background job processor"
-path = "~/projects/myapp-worker"
-type = "rust"
-depends_on = ["database", "api"]
-tags = ["production", "background"]
-```
-
-Workflows automatically detect which ecosystem you're in and can access:
-
-```jinja2
-{{ ecosystem.name }}                    - Ecosystem name
-{{ ecosystem.description }}             - Description
-{{ ecosystem.knowledge }}               - Array of facts
-{{ ecosystem.projects }}                - All projects
-{{ ecosystem.current_project.name }}    - Current project name
-{{ ecosystem.current_project.type }}    - Project type
-{{ ecosystem.current_project.depends_on }} - Dependencies
-{{ ecosystem.current_project.tags }}    - Project tags
-```
-
-## Workflows
-
-### Step Types
-
-```toml
-# Shell: run a command
 [[steps]]
 name = "fetch"
 type = "shell"
-run = "gh issue view {{ args.issue }}"
+run = "gh pr diff {{ args.pr }}"
+```
 
-# Query: call LLM backend(s)
+### query - call LLM backend(s)
+
+```toml
 [[steps]]
 name = "analyze"
 type = "query"
 role = "analyzer"
-prompt = "Analyze: {{ steps.fetch.output }}"
+prompt = "Find bugs in:\n\n{{ steps.fetch.output }}"
 depends_on = ["fetch"]
+```
 
-# Apply: apply edits from LLM output
+### apply - apply LLM-suggested edits
+
+```toml
 [[steps]]
 name = "fix"
 type = "apply"
-source = "steps.analyze"
+source = "analyze"
 verify = "cargo test"
 verify_retries = 2
 rollback_on_failure = true
 depends_on = ["analyze"]
+```
 
-# Store: persist data to SQLite memory database
+### store - persist findings to SQLite memory
+
+```toml
 [[steps]]
-name = "save_facts"
+name = "save"
 type = "store"
 prompt = "{{ steps.analyze.output }}"
 depends_on = ["analyze"]
 ```
 
-### Template Variables
+## Template Variables
 
-- `{{ args.name }}`: workflow arguments
-- `{{ steps.name.output }}`: previous step output
-- `{{ env.VAR }}`: environment variables
-- `{{ team }}`: detected team name
-- `{{ ecosystem.name }}`: detected ecosystem
-- `{{ ecosystem.knowledge }}`: ecosystem facts
-- `{{ ecosystem.current_project }}`: current project info
-
-### Filters
+Inside prompts and shell commands:
 
 ```
-{{ value | shell_escape }}   # escape for shell
-{{ value | json }}           # JSON encode
-{{ list | join(", ") }}      # join array
-{{ text | lines }}           # split into lines
-{{ text | trim }}            # trim whitespace
-{{ value | default("x") }}   # default if empty
+{{ args.name }}                   workflow arguments
+{{ steps.name.output }}           previous step output
+{{ env.VAR }}                     environment variables
+{{ team }}                        auto-detected team
+{{ ecosystem.name }}              detected ecosystem
+{{ ecosystem.knowledge }}         stored ecosystem facts
+{{ ecosystem.current_project }}   current project info
 ```
 
-### Conditionals
+Filters: `shell_escape`, `json`, `join`, `lines`, `trim`, `default`.
+
+## Configuration Reference
+
+### Backend options
 
 ```toml
-[[steps]]
-name = "rust-only"
-type = "shell"
-run = "cargo clippy"
-if = "team == 'rust'"
+[backends.example]
+command = "claude"        # CLI command or HTTP base URL
+args = ["-p"]             # CLI arguments
+model = "gpt-4o"          # model name (HTTP backends)
+api_key = "${ENV_VAR}"    # API key; ${VAR} expands from environment
+enabled = true
+timeout = 300             # seconds
+max_retries = 3
 ```
 
-### Iteration
+### Role execution modes
+
+- `first` - use first available backend
+- `parallel` - run all backends, collect all results
+- `fallback` - try each backend until one succeeds
+
+### Teams
+
+Auto-detect project type and apply team-specific backend overrides:
 
 ```toml
-[[steps]]
-name = "check-files"
-type = "shell"
-run = "wc -l {{ item }}"
-for_each = "steps.list.output | lines"
+[teams.rust]
+detect = ["Cargo.toml"]
+verify = "cargo clippy && cargo test"
+
+[teams.rust.roles.analyzer]
+backends = ["claude", "codex"]
 ```
 
-### Store Steps and Ecosystem Memory
+### Ecosystems
 
-Store steps persist LLM analysis results to a SQLite database for later querying.
+Track multi-project systems and seed context into prompts:
 
-**Database Location:**
-`~/.config/llm-mux/memory/<ecosystem-name>.db`
-
-**Data Format:**
-Store steps parse JSON from previous steps and save to the memory database.
-
-Facts require:
-```json
-{
-  "facts": [
-    {
-      "project": "project-name",
-      "fact": "description",
-      "source": "where found (e.g., Cargo.toml)",
-      "confidence": 1.0
-    }
-  ]
-}
-```
-
-Relationships require:
-```json
-{
-  "relationships": [
-    {
-      "from": "source-project",
-      "to": "target-project",
-      "type": "depends_on|calls_api|shares_db|deploys_with",
-      "evidence": "brief explanation"
-    }
-  ]
-}
-```
-
-**Usage:**
 ```toml
-[[steps]]
-name = "analyze"
-type = "query"
-role = "analyzer"
-prompt = """
-Analyze the codebase and return facts.
+[ecosystems.myapp]
+knowledge = [
+    "API uses JWT tokens with 1 hour expiration",
+    "Redis cache invalidation happens via pub/sub",
+]
 
-IMPORTANT: Return JSON with this exact structure:
-{
-  "facts": [
-    {"project": "myapp", "fact": "Uses PostgreSQL", "source": "config.yml", "confidence": 1.0}
-  ]
-}
-"""
-
-[[steps]]
-name = "store"
-type = "store"
-prompt = "{{ steps.analyze.output }}"
-depends_on = ["analyze"]
+[ecosystems.myapp.projects.api]
+path = "~/projects/myapp-api"
+type = "rust"
+depends_on = ["database"]
 ```
-
-See `examples/workflows/discover-ecosystem.toml` for a complete example.
 
 ## CLI Reference
 
 ```
 llm-mux run <workflow> [args...]   Run a workflow
+llm-mux run <workflow> --dry-run   Preview without executing
 llm-mux validate <workflow>        Validate workflow syntax
 llm-mux doctor                     Check backend availability
 llm-mux backends                   List configured backends
 llm-mux teams                      List configured teams
 llm-mux roles                      List configured roles
 llm-mux ecosystems                 List configured ecosystems
+llm-mux init --global              Generate starter config
+llm-mux init --project             Generate project config
 
-Options:
-  --team <name>      Override team detection
-  --output <mode>    Output format: console, json, quiet
+Global options:
+  --team <name>      Override auto-detected team
+  --output <mode>    console | json | quiet
   --debug            Enable debug output
-  --quiet            Suppress progress output
 ```
 
 ## Examples
 
-### Simple Review
+### Parallel bug hunt across models
 
 ```toml
-# .llm-mux/workflows/review.toml
-name = "review"
+name = "bug-hunt"
 
 [[steps]]
-name = "diff"
+name = "read"
 type = "shell"
-run = "git diff"
+run = "cat {{ args.file }}"
 
 [[steps]]
-name = "review"
+name = "hunt"
 type = "query"
-role = "analyzer"
-prompt = "Review this diff:\n{{ steps.diff.output }}"
-depends_on = ["diff"]
+role = "analyzer"         # parallel across all backends in role
+prompt = "Find every bug in this file:\n\n{{ steps.read.output }}"
+depends_on = ["read"]
 ```
 
-### Parallel Analysis
-
-```toml
-name = "analyze"
-
-[roles.multi]
-backends = ["claude", "codex", "gemini"]
-execution = "parallel"
-
-[[steps]]
-name = "analyze"
-type = "query"
-role = "multi"
-prompt = "Find bugs in: {{ args.file }}"
-```
-
-### Fix with Verification
+### Fix and verify
 
 ```toml
 name = "fix"
@@ -402,107 +287,51 @@ name = "fix"
 name = "identify"
 type = "query"
 role = "analyzer"
-prompt = "Find the bug in {{ args.file }}"
+prompt = "Identify the bug in {{ args.file }}"
 
 [[steps]]
-name = "fix"
+name = "patch"
 type = "query"
 role = "coder"
 prompt = """
 Fix this bug: {{ steps.identify.output }}
 
-Return edits as JSON: {"path": "...", "old": "...", "new": "..."}
+Return the edit as:
+<<<
+old code
+===
+new code
+>>>
 """
 depends_on = ["identify"]
 
 [[steps]]
 name = "apply"
 type = "apply"
-source = "steps.fix"
+source = "patch"
 verify = "cargo test"
-verify_retries = 2
-depends_on = ["fix"]
+rollback_on_failure = true
+depends_on = ["patch"]
 ```
 
-### Ecosystem-Aware Bug Hunt
+### Iterate over files
 
 ```toml
-name = "bug-hunt"
-description = "Search for bugs across ecosystem"
+[[steps]]
+name = "list"
+type = "shell"
+run = "git diff --name-only HEAD~1"
 
 [[steps]]
-name = "analyze"
+name = "review-each"
 type = "query"
 role = "analyzer"
-prompt = """
-Search for potential bugs in {{ ecosystem.current_project.name }}.
-
-Project type: {{ ecosystem.current_project.type }}
-
-Known ecosystem facts:
-{% for fact in ecosystem.knowledge %}
-- {{ fact }}
-{% endfor %}
-
-Dependencies to consider:
-{% for dep in ecosystem.current_project.depends_on %}
-- {{ dep }}
-{% endfor %}
-
-Focus on common issues for {{ ecosystem.current_project.type }} projects.
-"""
+for_each = "steps.list.output | lines"
+prompt = "Review {{ item }}:\n\n{{ steps.read.output }}"
+depends_on = ["list"]
 ```
-
-### Ecosystem Discovery
-
-Analyze projects and store findings in the memory database:
-
-```toml
-name = "discover"
-description = "Discover and store ecosystem facts"
-
-[[steps]]
-name = "analyze"
-type = "query"
-role = "analyzer"
-timeout = 180
-prompt = """
-Analyze the {{ ecosystem.current_project.name }} project structure.
-
-IMPORTANT: Return JSON with this exact structure:
-{
-  "facts": [
-    {
-      "project": "project-name",
-      "fact": "brief fact description",
-      "source": "where you found this (e.g., Cargo.toml)",
-      "confidence": 1.0
-    }
-  ]
-}
-
-Each fact MUST have all four fields: project, fact, source, confidence.
-"""
-
-[steps.output_schema]
-type = "object"
-required = ["facts"]
-
-[steps.output_schema.properties.facts]
-type = "array"
-
-[[steps]]
-name = "store"
-type = "store"
-prompt = "{{ steps.analyze.output }}"
-depends_on = ["analyze"]
-```
-
-See `examples/workflows/discover-ecosystem.toml` for a complete implementation with multiple analysis steps and relationship discovery.
 
 ## Contributing
-
-llm-mux is built with Rust. To contribute:
 
 ```bash
 git clone https://github.com/ducks/llm-mux
@@ -510,10 +339,6 @@ cd llm-mux
 cargo build
 cargo test
 ```
-
-## Publishing
-
-Published to [crates.io](https://crates.io/crates/llm-mux) and [GitHub](https://github.com/ducks/llm-mux).
 
 ## License
 
