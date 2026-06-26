@@ -94,6 +94,7 @@ impl WorkflowRunner {
         args: HashMap<String, String>,
         working_dir: &Path,
         team_override: Option<&str>,
+        dry_run: bool,
     ) -> Result<WorkflowResult, WorkflowError> {
         // Validate workflow first
         self.validate_workflow(&workflow)?;
@@ -127,7 +128,7 @@ impl WorkflowRunner {
         }
 
         // Create execution context
-        let ctx = ExecutionContext::new(self.config.clone());
+        let ctx = ExecutionContext::new(self.config.clone(), dry_run);
 
         // Get execution order
         let order = self.topological_sort(&workflow)?;
@@ -511,7 +512,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         let result = runner
-            .run(workflow, HashMap::new(), dir.path(), None)
+            .run(workflow, HashMap::new(), dir.path(), None, false)
             .await
             .unwrap();
 
@@ -612,7 +613,7 @@ mod tests {
         args.insert("message".into(), "hello from args".into());
 
         let dir = TempDir::new().unwrap();
-        let result = runner.run(workflow, args, dir.path(), None).await.unwrap();
+        let result = runner.run(workflow, args, dir.path(), None, false).await.unwrap();
 
         assert!(result.success);
         assert!(
@@ -650,7 +651,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let result = runner
-            .run(workflow, HashMap::new(), dir.path(), None)
+            .run(workflow, HashMap::new(), dir.path(), None, false)
             .await
             .unwrap();
 

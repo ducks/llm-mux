@@ -61,6 +61,10 @@ enum Commands {
         /// Workflow name
         workflow: String,
 
+        /// Preview what the workflow would do without executing shell or apply steps
+        #[arg(long)]
+        dry_run: bool,
+
         /// Workflow arguments (key=value or positional)
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -168,7 +172,11 @@ async fn main() -> Result<()> {
 
     // Execute command
     let exit_code = match cli.command {
-        Commands::Run { workflow, args } => {
+        Commands::Run {
+            workflow,
+            args,
+            dry_run,
+        } => {
             match commands::run_workflow(
                 &workflow,
                 args,
@@ -177,6 +185,7 @@ async fn main() -> Result<()> {
                 config,
                 &*handler,
                 cli.output_file.as_deref(),
+                dry_run,
             )
             .await
             {

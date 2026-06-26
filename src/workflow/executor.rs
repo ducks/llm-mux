@@ -55,14 +55,16 @@ pub struct ExecutionContext {
     pub config: Arc<LlmuxConfig>,
     pub template_engine: TemplateEngine,
     pub role_executor: RoleExecutor,
+    pub dry_run: bool,
 }
 
 impl ExecutionContext {
-    pub fn new(config: Arc<LlmuxConfig>) -> Self {
+    pub fn new(config: Arc<LlmuxConfig>, dry_run: bool) -> Self {
         Self {
             role_executor: RoleExecutor::new(config.clone()),
             config,
             template_engine: TemplateEngine::new(),
+            dry_run,
         }
     }
 }
@@ -101,6 +103,41 @@ pub async fn execute_step(
     }
 
     let result = match step.step_type {
+        StepType::Shell if ctx.dry_run => {
+            let command = step.run.as_deref().unwrap_or("<no command>");
+            let rendered = ctx
+                .template_engine
+                .render_shell(command, template_ctx)
+                .unwrap_or_else(|_| command.to_string());
+            Ok(StepResult {
+                output: Some(format!("[dry-run] would run: {}", rendered)),
+                outputs: std::collections::HashMap::new(),
+                failed: false,
+                error: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+                backend: Some("shell".into()),
+                backends: vec!["shell".into()],
+            })
+        }
+        StepType::Apply if ctx.dry_run => {
+            let source = step.source.as_deref().unwrap_or("<unknown>");
+            let verify = step
+                .verify
+                .as_deref()
+                .map(|v| format!(", verify: {}", v))
+                .unwrap_or_default();
+            Ok(StepResult {
+                output: Some(format!(
+                    "[dry-run] would apply edits from step '{}'{}", source, verify
+                )),
+                outputs: std::collections::HashMap::new(),
+                failed: false,
+                error: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+                backend: Some("apply".into()),
+                backends: vec!["apply".into()],
+            })
+        }
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
         StepType::Query => execute_query_step(step, ctx, template_ctx, team).await,
         StepType::Apply => execute_apply_step(step, ctx, template_ctx, working_dir).await,
@@ -764,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_step() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -787,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_with_template() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let mut template_ctx = TemplateContext::new();
         template_ctx.args.insert("name".into(), "world".into());
         let dir = TempDir::new().unwrap();
@@ -811,7 +848,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_failure() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -835,7 +872,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_timeout() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -856,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_timeout_continue_on_error() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -881,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_timeout_success() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -904,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_shell_continue_on_error() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -927,7 +964,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_skipped_condition() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
@@ -950,7 +987,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_query_step() {
         let config = Arc::new(create_test_config());
-        let ctx = ExecutionContext::new(config);
+        let ctx = ExecutionContext::new(config, false);
         let template_ctx = TemplateContext::new();
         let dir = TempDir::new().unwrap();
 
