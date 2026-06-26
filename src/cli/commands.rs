@@ -126,6 +126,7 @@ pub async fn run_workflow(
     config: Arc<LlmuxConfig>,
     handler: &dyn OutputHandler,
     output_file: Option<&Path>,
+    dry_run: bool,
 ) -> Result<i32, String> {
     // Load workflow
     let workflow = load_workflow(workflow_name, Some(working_dir))
@@ -133,6 +134,12 @@ pub async fn run_workflow(
 
     // Parse workflow args (simple key=value for now)
     let parsed_args = parse_workflow_args(&args);
+
+    if dry_run {
+        handler.emit(OutputEvent::Info {
+            message: "[dry-run] shell and apply steps will be skipped".into(),
+        });
+    }
 
     handler.emit(OutputEvent::WorkflowStart {
         name: workflow.name.clone(),
@@ -143,7 +150,7 @@ pub async fn run_workflow(
     let runner = WorkflowRunner::new(config.clone());
 
     let result = runner
-        .run(workflow.clone(), parsed_args, working_dir, team_override)
+        .run(workflow.clone(), parsed_args, working_dir, team_override, dry_run)
         .await
         .map_err(|e| format!("Workflow execution failed: {}", e))?;
 
