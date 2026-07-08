@@ -32,6 +32,11 @@ pub enum ApplyError {
 
     #[error("multiple matches for old text in {path}")]
     AmbiguousMatch { path: PathBuf },
+
+    #[error(
+        "refusing to edit path '{path}' outside the working directory (edits are confined to the project tree)"
+    )]
+    PathEscape { path: PathBuf },
 }
 
 /// Result of applying edits
@@ -65,6 +70,73 @@ impl DiffApplier {
         }
     }
 
+    /// Resolve an edit's target path against the working directory, refusing
+    /// anything that would escape the project tree.
+    ///
+    /// The apply-and-verify path acts on paths an LLM produced, so a
+    /// hallucinated or prompt-injected `/etc/...` or `../../` must never write
+    /// outside `working_dir`. Three ways a path can escape, all rejected here:
+    ///
+    /// 1. **Absolute path** — `Path::join` discards the base entirely, so
+    ///    `working_dir.join("/etc/passwd")` is `/etc/passwd`. Rejected before
+    ///    the join.
+    /// 2. **`..` traversal** — any `ParentDir` component can climb out.
+    ///    Rejected lexically, before touching the filesystem.
+    /// 3. **Symlink escape** — a path (or a parent directory) that is a symlink
+    ///    pointing outside the tree. Caught by canonicalizing the deepest
+    ///    existing ancestor and confirming it stays under the canonical root.
+    ///
+    /// Returns the joined (non-canonical) path to use for the actual I/O, so
+    /// callers keep operating on paths relative to `working_dir` as before.
+    fn resolve_path(&self, path: &Path) -> Result<PathBuf, ApplyError> {
+        use std::path::Component;
+
+        // (1) and (2): reject absolute paths, root/prefix components, and any
+        // `..` lexically. `.` and normal components are fine.
+        for component in path.components() {
+            match component {
+                Component::Normal(_) | Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(ApplyError::PathEscape {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+        }
+
+        let joined = self.working_dir.join(path);
+
+        // (3): canonicalize the deepest ancestor that exists on disk (the full
+        // path may not exist yet for a create) and require it to stay under the
+        // canonical working-dir root. This resolves symlinks in the prefix.
+        let root = self
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.working_dir.clone());
+
+        let mut ancestor = joined.as_path();
+        let real_ancestor = loop {
+            if let Ok(real) = ancestor.canonicalize() {
+                break real;
+            }
+            match ancestor.parent() {
+                Some(parent) => ancestor = parent,
+                // Walked past the root without finding an existing ancestor;
+                // fall back to the lexically-cleaned join under root, which the
+                // component check above already proved cannot climb out.
+                None => return Ok(joined),
+            }
+        };
+
+        if real_ancestor.starts_with(&root) {
+            Ok(joined)
+        } else {
+            Err(ApplyError::PathEscape {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
     /// Apply all edit operations
     pub fn apply(&self, edits: &[EditOperation]) -> Result<ApplyResult, ApplyError> {
         let mut modified_files = Vec::new();
@@ -79,7 +151,7 @@ impl DiffApplier {
         for edit in edits {
             match edit {
                 EditOperation::UnifiedDiff { path, hunks } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     let backup = self.create_backup(&full_path)?;
                     self.apply_unified_diff(&full_path, hunks)?;
                     modified_files.push(ModifiedFile {
@@ -88,7 +160,7 @@ impl DiffApplier {
                     });
                 }
                 EditOperation::OldNewPair { path, old, new } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     // Empty old means create new file
                     if old.is_empty() {
                         if let Some(parent) = full_path.parent() {
@@ -112,7 +184,7 @@ impl DiffApplier {
                     }
                 }
                 EditOperation::FullFile { path, content } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     if full_path.exists() {
                         let backup = self.create_backup(&full_path)?;
                         modified_files.push(ModifiedFile {
@@ -523,6 +595,133 @@ mod tests {
 
         let result = applier.apply(&edits);
         assert!(matches!(result, Err(ApplyError::OldTextNotFound { .. })));
+    }
+
+    #[test]
+    fn test_rejects_absolute_path() {
+        // Path::join discards the base on an absolute path, so without the
+        // guard this would target /tmp/llmux-escape-test directly.
+        let dir = TempDir::new().unwrap();
+        let applier = DiffApplier::new(dir.path());
+
+        let escape = std::env::temp_dir().join("llmux-escape-test-abs");
+        let _ = fs::remove_file(&escape);
+        let edits = vec![EditOperation::FullFile {
+            path: escape.clone(),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(!escape.exists(), "absolute path escaped confinement");
+    }
+
+    #[test]
+    fn test_rejects_parent_traversal() {
+        // The working dir is a subdir; `../` would climb into its parent.
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let applier = DiffApplier::new(&work);
+
+        let target = root.path().join("sibling.txt");
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("../sibling.txt"),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(!target.exists(), "../ traversal escaped confinement");
+    }
+
+    #[test]
+    fn test_rejects_parent_traversal_for_old_new_create() {
+        // Same escape via the OldNewPair create path (empty `old`).
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let applier = DiffApplier::new(&work);
+
+        let edits = vec![EditOperation::OldNewPair {
+            path: PathBuf::from("../../etc-ish/passwd"),
+            old: String::new(),
+            new: "pwned".to_string(),
+        }];
+
+        assert!(matches!(
+            applier.apply(&edits),
+            Err(ApplyError::PathEscape { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rejects_symlinked_parent_escape() {
+        // A directory inside the working dir is a symlink pointing outside it.
+        // Lexically the path stays inside; only canonicalization catches it.
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // work/link -> ../outside
+        symlink(&outside, work.join("link")).unwrap();
+
+        let applier = DiffApplier::new(&work);
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("link/pwned.txt"),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(
+            !outside.join("pwned.txt").exists(),
+            "symlinked parent escaped confinement"
+        );
+    }
+
+    #[test]
+    fn test_allows_legitimate_nested_path() {
+        // Confinement must not break normal nested edits.
+        let dir = TempDir::new().unwrap();
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("src/inner/mod.rs"),
+            content: "fn ok() {}".to_string(),
+        }];
+
+        let result = applier.apply(&edits).unwrap();
+        assert_eq!(result.created_files.len(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/inner/mod.rs")).unwrap(),
+            "fn ok() {}"
+        );
+    }
+
+    #[test]
+    fn test_allows_curdir_prefixed_path() {
+        // `./file` is legitimate — must not be mistaken for an escape.
+        let dir = TempDir::new().unwrap();
+        setup_test_file(dir.path(), "test.rs", "old");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![EditOperation::OldNewPair {
+            path: PathBuf::from("./test.rs"),
+            old: "old".to_string(),
+            new: "new".to_string(),
+        }];
+
+        assert!(applier.apply(&edits).is_ok());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("test.rs")).unwrap(),
+            "new"
+        );
     }
 
     #[test]
