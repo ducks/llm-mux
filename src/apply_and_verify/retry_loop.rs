@@ -297,6 +297,113 @@ mod tests {
         assert!(content.contains("fn old()"));
     }
 
+    /// Initialize a git repo in `dir`, commit `path` with `committed`, then
+    /// overwrite it with `uncommitted` (leaving dirty, unstaged work). Returns
+    /// once the tree is in that state. Skips (returns false) if git is absent.
+    fn git_repo_with_uncommitted(
+        dir: &Path,
+        path: &str,
+        committed: &str,
+        uncommitted: &str,
+    ) -> bool {
+        use std::process::Command;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return false;
+        }
+        let _ = git(&["config", "user.email", "t@t"]);
+        let _ = git(&["config", "user.name", "t"]);
+        fs::write(dir.join(path), committed).unwrap();
+        if !git(&["add", path]) || !git(&["commit", "-qm", "init"]) {
+            return false;
+        }
+        // The user's in-flight, uncommitted edit.
+        fs::write(dir.join(path), uncommitted).unwrap();
+        true
+    }
+
+    #[tokio::test]
+    async fn test_backup_rollback_preserves_uncommitted_user_work() {
+        let dir = TempDir::new().unwrap();
+        // Committed "A", user edited to "fn user_wip() {}" without committing.
+        if !git_repo_with_uncommitted(
+            dir.path(),
+            "test.rs",
+            "fn committed() {}",
+            "fn user_wip() {}",
+        ) {
+            eprintln!("git unavailable; skipping");
+            return;
+        }
+
+        // llm-mux edits the user's in-flight version, then verify fails.
+        let source_output =
+            r#"{"path": "test.rs", "old": "fn user_wip() {}", "new": "fn llm_edit() {}"}"#;
+        let config = ApplyVerifyConfig {
+            source_step: "test".into(),
+            verify_command: Some("false".into()),
+            verify_retries: 0,
+            rollback_strategy: RollbackStrategy::Backup,
+            ..Default::default()
+        };
+
+        let result = apply_and_verify(source_output, &config, dir.path()).await;
+        assert!(matches!(
+            result,
+            Err(ApplyVerifyError::MaxRetriesExceeded { .. })
+        ));
+
+        // Must restore the user's uncommitted work, NOT git's committed HEAD.
+        let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
+        assert_eq!(
+            content, "fn user_wip() {}",
+            "backup rollback must restore the user's uncommitted state, not HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_rollback_loses_uncommitted_work_regression_guard() {
+        // Documents exactly why Backup is the default: the Git strategy
+        // restores to HEAD, discarding the user's uncommitted edit. If this
+        // ever stops being true (git rollback learns to preserve the tree),
+        // revisit the default.
+        let dir = TempDir::new().unwrap();
+        if !git_repo_with_uncommitted(
+            dir.path(),
+            "test.rs",
+            "fn committed() {}",
+            "fn user_wip() {}",
+        ) {
+            eprintln!("git unavailable; skipping");
+            return;
+        }
+
+        let source_output =
+            r#"{"path": "test.rs", "old": "fn user_wip() {}", "new": "fn llm_edit() {}"}"#;
+        let config = ApplyVerifyConfig {
+            source_step: "test".into(),
+            verify_command: Some("false".into()),
+            verify_retries: 0,
+            rollback_strategy: RollbackStrategy::Git,
+            ..Default::default()
+        };
+
+        let _ = apply_and_verify(source_output, &config, dir.path()).await;
+
+        let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
+        assert_eq!(
+            content, "fn committed() {}",
+            "git rollback restores to HEAD (this is the data-loss the Backup default avoids)"
+        );
+    }
+
     #[tokio::test]
     async fn test_apply_no_verify() {
         let dir = TempDir::new().unwrap();
@@ -338,7 +445,9 @@ mod tests {
     fn test_config_default() {
         let config = ApplyVerifyConfig::default();
         assert_eq!(config.verify_retries, 0);
-        assert_eq!(config.rollback_strategy, RollbackStrategy::Git);
+        // Default rollback preserves the user's pre-run state (see
+        // RollbackStrategy docs); Git-checkout rollback is opt-in only.
+        assert_eq!(config.rollback_strategy, RollbackStrategy::Backup);
         assert!(config.verify_timeout.is_some());
     }
 

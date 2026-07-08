@@ -515,8 +515,12 @@ async fn execute_apply_step(
         source_step: source_step.clone(),
         verify_command: step.verify.clone(),
         verify_retries: step.verify_retries,
+        // Roll back from the pre-run backups the applier takes, not `git
+        // checkout` (RollbackStrategy::Git), which restores to HEAD and so
+        // discards any uncommitted work the user had in the touched files
+        // before the run started.
         rollback_strategy: if step.rollback_on_failure {
-            RollbackStrategy::Git
+            RollbackStrategy::Backup
         } else {
             RollbackStrategy::None
         },
