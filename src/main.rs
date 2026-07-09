@@ -52,6 +52,14 @@ struct Cli {
     /// Suppress normal output (same as --output=quiet)
     #[arg(long, global = true)]
     quiet: bool,
+
+    /// Trust the project's `.llm-mux/config.toml` to define backend commands.
+    ///
+    /// By default a project config cannot set a backend's `command`/`args` or
+    /// `command_wrapper` (those run as processes, so a hostile repo could run
+    /// arbitrary code). Pass this only in repos you trust.
+    #[arg(long, global = true)]
+    allow_project_backends: bool,
 }
 
 #[derive(Subcommand)]
@@ -158,8 +166,17 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Load config
-    let config = Arc::new(config::LlmuxConfig::load(Some(&working_dir))?);
+    // Load config. Project-local config is untrusted for backend commands
+    // unless the user explicitly opts in.
+    let trust = if cli.allow_project_backends {
+        config::ProjectTrust::Trusted
+    } else {
+        config::ProjectTrust::Untrusted
+    };
+    let config = Arc::new(config::LlmuxConfig::load_with_trust(
+        Some(&working_dir),
+        trust,
+    )?);
 
     // Setup cancellation token for signal handling
     let cancel_token = signals::CancellationToken::new();

