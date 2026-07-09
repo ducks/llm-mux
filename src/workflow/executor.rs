@@ -128,7 +128,8 @@ pub async fn execute_step(
                 .unwrap_or_default();
             Ok(StepResult {
                 output: Some(format!(
-                    "[dry-run] would apply edits from step '{}'{}", source, verify
+                    "[dry-run] would apply edits from step '{}'{}",
+                    source, verify
                 )),
                 outputs: std::collections::HashMap::new(),
                 failed: false,

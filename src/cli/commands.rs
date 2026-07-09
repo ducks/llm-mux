@@ -150,7 +150,13 @@ pub async fn run_workflow(
     let runner = WorkflowRunner::new(config.clone());
 
     let result = runner
-        .run(workflow.clone(), parsed_args, working_dir, team_override, dry_run)
+        .run(
+            workflow.clone(),
+            parsed_args,
+            working_dir,
+            team_override,
+            dry_run,
+        )
         .await
         .map_err(|e| format!("Workflow execution failed: {}", e))?;
 
