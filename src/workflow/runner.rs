@@ -613,7 +613,10 @@ mod tests {
         args.insert("message".into(), "hello from args".into());
 
         let dir = TempDir::new().unwrap();
-        let result = runner.run(workflow, args, dir.path(), None, false).await.unwrap();
+        let result = runner
+            .run(workflow, args, dir.path(), None, false)
+            .await
+            .unwrap();
 
         assert!(result.success);
         assert!(
