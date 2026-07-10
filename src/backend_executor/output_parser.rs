@@ -61,17 +61,17 @@ fn extract_from_code_block(text: &str, lang: &str) -> Option<Value> {
 /// Find JSON object or array in text
 fn find_json_in_text(text: &str) -> Option<Value> {
     // Look for JSON objects
-    if let Some(start) = text.find('{') {
-        if let Some(json) = try_parse_from_position(text, start, '{', '}') {
-            return Some(json);
-        }
+    if let Some(start) = text.find('{')
+        && let Some(json) = try_parse_from_position(text, start, '{', '}')
+    {
+        return Some(json);
     }
 
     // Look for JSON arrays
-    if let Some(start) = text.find('[') {
-        if let Some(json) = try_parse_from_position(text, start, '[', ']') {
-            return Some(json);
-        }
+    if let Some(start) = text.find('[')
+        && let Some(json) = try_parse_from_position(text, start, '[', ']')
+    {
+        return Some(json);
     }
 
     None

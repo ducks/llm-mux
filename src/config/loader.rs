@@ -159,12 +159,12 @@ impl LlmuxConfig {
         let mut config = Self::default();
 
         // Load user config. The user's own config is always trusted.
-        if let Some(user_config_path) = Self::user_config_path() {
-            if user_config_path.exists() {
-                let user_config = Self::load_file(&user_config_path)
-                    .with_context(|| format!("loading {}", user_config_path.display()))?;
-                config.merge(user_config);
-            }
+        if let Some(user_config_path) = Self::user_config_path()
+            && user_config_path.exists()
+        {
+            let user_config = Self::load_file(&user_config_path)
+                .with_context(|| format!("loading {}", user_config_path.display()))?;
+            config.merge(user_config);
         }
 
         // Load project config.

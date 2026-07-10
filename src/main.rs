@@ -143,10 +143,10 @@ async fn main() -> Result<()> {
         })
     };
 
-    if let Some(ref log_path) = log_file {
-        if cli.debug {
-            eprintln!("Debug logging to: {}", log_path.display());
-        }
+    if let Some(ref log_path) = log_file
+        && cli.debug
+    {
+        eprintln!("Debug logging to: {}", log_path.display());
     }
 
     logging::init_logging(cli.debug, cli.quiet, log_file)?;

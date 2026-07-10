@@ -290,7 +290,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let created_path = setup_test_file(dir.path(), "new.rs", "new content");
 
-        let result = rollback_backup(&[], &[created_path.clone()]).await.unwrap();
+        let result = rollback_backup(&[], std::slice::from_ref(&created_path))
+            .await
+            .unwrap();
 
         assert_eq!(result.restored.len(), 1);
         assert!(!created_path.exists());

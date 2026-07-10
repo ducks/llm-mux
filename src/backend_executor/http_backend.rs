@@ -158,10 +158,10 @@ impl HttpBackend {
     /// Try to parse retry-after from error response
     fn parse_retry_after(&self, body: &str) -> Option<Duration> {
         // Try to parse as JSON and look for retry_after field
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Some(seconds) = json.get("retry_after").and_then(|v| v.as_f64()) {
-                return Some(Duration::from_secs_f64(seconds));
-            }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body)
+            && let Some(seconds) = json.get("retry_after").and_then(|v| v.as_f64())
+        {
+            return Some(Duration::from_secs_f64(seconds));
         }
         None
     }

@@ -75,7 +75,7 @@ test:
 
 # Run clippy
 clippy:
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 # Clean build artifacts
 clean:

@@ -101,26 +101,25 @@ enum EditJson {
 /// Parse edits from LLM output, auto-detecting format
 pub fn parse_edits(output: &str) -> Result<Vec<EditOperation>, EditParseError> {
     // Try unified diff first
-    if let Ok(edits) = parse_unified_diff(output) {
-        if !edits.is_empty() {
-            return Ok(edits);
-        }
+    if let Ok(edits) = parse_unified_diff(output)
+        && !edits.is_empty()
+    {
+        return Ok(edits);
     }
 
     // Try JSON formats
-    if let Ok(edits) = parse_json_edits(output) {
-        if !edits.is_empty() {
-            return Ok(edits);
-        }
+    if let Ok(edits) = parse_json_edits(output)
+        && !edits.is_empty()
+    {
+        return Ok(edits);
     }
 
     // Try extracting JSON from markdown code blocks
-    if let Some(json_str) = extract_json_block(output) {
-        if let Ok(edits) = parse_json_edits(&json_str) {
-            if !edits.is_empty() {
-                return Ok(edits);
-            }
-        }
+    if let Some(json_str) = extract_json_block(output)
+        && let Ok(edits) = parse_json_edits(&json_str)
+        && !edits.is_empty()
+    {
+        return Ok(edits);
     }
 
     Err(EditParseError::NoEditsFound)
@@ -148,13 +147,13 @@ pub fn parse_unified_diff(input: &str) -> Result<Vec<EditOperation>, EditParseEr
             let path = PathBuf::from(&caps[1]);
 
             // If we have a previous file, save it
-            if let Some(prev_path) = current_path.take() {
-                if !current_hunks.is_empty() {
-                    edits.push(EditOperation::UnifiedDiff {
-                        path: prev_path,
-                        hunks: std::mem::take(&mut current_hunks),
-                    });
-                }
+            if let Some(prev_path) = current_path.take()
+                && !current_hunks.is_empty()
+            {
+                edits.push(EditOperation::UnifiedDiff {
+                    path: prev_path,
+                    hunks: std::mem::take(&mut current_hunks),
+                });
             }
 
             // Start tracking new file (use +++ path as the canonical one)
@@ -217,13 +216,13 @@ pub fn parse_unified_diff(input: &str) -> Result<Vec<EditOperation>, EditParseEr
     }
 
     // Save final file if any
-    if let Some(path) = current_path {
-        if !current_hunks.is_empty() {
-            edits.push(EditOperation::UnifiedDiff {
-                path,
-                hunks: current_hunks,
-            });
-        }
+    if let Some(path) = current_path
+        && !current_hunks.is_empty()
+    {
+        edits.push(EditOperation::UnifiedDiff {
+            path,
+            hunks: current_hunks,
+        });
     }
 
     Ok(edits)

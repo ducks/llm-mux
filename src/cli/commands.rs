@@ -118,6 +118,10 @@ impl ProjectType {
 }
 
 /// Run a workflow
+// This is the single top-level CLI entry point; its arguments map 1:1 to
+// distinct CLI flags, so a params struct would add indirection without
+// grouping anything that naturally belongs together.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     workflow_name: &str,
     args: Vec<String>,
@@ -189,17 +193,16 @@ pub async fn run_workflow(
         });
 
     // Write to file if specified
-    if let Some(path) = output_file {
-        if let Some(output) = final_output {
-            // Create parent directories if they don't exist
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!("Failed to create directory {}: {}", parent.display(), e)
-                })?;
-            }
-            std::fs::write(path, output)
-                .map_err(|e| format!("Failed to write output to {}: {}", path.display(), e))?;
+    if let Some(path) = output_file
+        && let Some(output) = final_output
+    {
+        // Create parent directories if they don't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
+        std::fs::write(path, output)
+            .map_err(|e| format!("Failed to write output to {}: {}", path.display(), e))?;
     }
 
     handler.result(result.success, final_output);
@@ -526,13 +529,12 @@ pub async fn init_config(
         .arg("claude")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("claude");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ claude".into(),
-            });
-        }
+        detected_backends.push("claude");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ claude".into(),
+        });
     }
 
     // Check for codex
@@ -540,13 +542,12 @@ pub async fn init_config(
         .arg("codex")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("codex");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ codex".into(),
-            });
-        }
+        detected_backends.push("codex");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ codex".into(),
+        });
     }
 
     // Check for gemini-cli (npx)
@@ -556,13 +557,12 @@ pub async fn init_config(
         .arg("--version")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("gemini");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ gemini".into(),
-            });
-        }
+        detected_backends.push("gemini");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ gemini".into(),
+        });
     }
 
     // Check for ollama
@@ -571,13 +571,12 @@ pub async fn init_config(
         .arg("http://localhost:11434/api/tags")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("ollama");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ ollama".into(),
-            });
-        }
+        detected_backends.push("ollama");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ ollama".into(),
+        });
     }
 
     if detected_backends.is_empty() {
