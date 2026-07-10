@@ -111,20 +111,20 @@ impl WorkflowRunner {
         // Create state
         let mut state = WorkflowState::new(workflow.clone(), args, working_dir.to_path_buf());
 
-        if let Some(ref team_name) = team {
-            if let Some(team_config) = self.config.teams.get(team_name) {
-                state = state.with_team(team_name.clone(), team_config.clone());
-            }
+        if let Some(ref team_name) = team
+            && let Some(team_config) = self.config.teams.get(team_name)
+        {
+            state = state.with_team(team_name.clone(), team_config.clone());
         }
 
-        if let Some((ecosystem_name, project_name)) = ecosystem {
-            if let Some(ecosystem_config) = self.config.ecosystems.get(&ecosystem_name) {
-                state = state.with_ecosystem(
-                    ecosystem_name.clone(),
-                    ecosystem_config.clone(),
-                    Some(project_name),
-                );
-            }
+        if let Some((ecosystem_name, project_name)) = ecosystem
+            && let Some(ecosystem_config) = self.config.ecosystems.get(&ecosystem_name)
+        {
+            state = state.with_ecosystem(
+                ecosystem_name.clone(),
+                ecosystem_config.clone(),
+                Some(project_name),
+            );
         }
 
         // Create execution context
@@ -209,19 +209,19 @@ impl WorkflowRunner {
                     {
                         Ok(result) => {
                             // Save step output to file
-                            if let Some(ref output) = result.output {
-                                if let Err(e) = Self::save_step_output(
+                            if let Some(ref output) = result.output
+                                && let Err(e) = Self::save_step_output(
                                     &output_dir,
                                     &step_name,
                                     output,
                                     result.failed,
-                                ) {
-                                    tracing::warn!(
-                                        step = &step_name,
-                                        error = %e,
-                                        "Failed to save step output"
-                                    );
-                                }
+                                )
+                            {
+                                tracing::warn!(
+                                    step = &step_name,
+                                    error = %e,
+                                    "Failed to save step output"
+                                );
                             }
 
                             state.add_result(&step_name, result, step.continue_on_error);

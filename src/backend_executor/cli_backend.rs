@@ -196,10 +196,10 @@ impl BackendExecutor for CliBackend {
                         BackendResponse::new(stdout_text.clone(), self.name.clone(), elapsed);
 
                     // Try to parse JSON if this is a JSON-output backend
-                    if self.json_output {
-                        if let Ok(json) = serde_json::from_str(&stdout_text) {
-                            response = response.with_structured(json);
-                        }
+                    if self.json_output
+                        && let Ok(json) = serde_json::from_str(&stdout_text)
+                    {
+                        response = response.with_structured(json);
                     }
 
                     Ok(response)

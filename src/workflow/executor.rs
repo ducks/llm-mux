@@ -358,13 +358,12 @@ async fn execute_query_step(
     let mut step_result = result.to_step_result();
 
     // Validate against schema if present
-    if let Some(ref schema) = step.output_schema {
-        if let Some(ref output) = step_result.output {
-            if let Err(e) = validate_json_schema(output, schema) {
-                step_result.failed = true;
-                step_result.error = Some(format!("Output validation failed: {}", e));
-            }
-        }
+    if let Some(ref schema) = step.output_schema
+        && let Some(ref output) = step_result.output
+        && let Err(e) = validate_json_schema(output, schema)
+    {
+        step_result.failed = true;
+        step_result.error = Some(format!("Output validation failed: {}", e));
     }
 
     Ok(step_result)

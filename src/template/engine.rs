@@ -145,10 +145,10 @@ fn convert_minijinja_error(err: minijinja::Error, ctx: &TemplateContext) -> Temp
 /// Extract variable name from minijinja error message
 fn extract_var_from_error(msg: &str) -> String {
     // Messages look like: "undefined value (in <string>:1): variable is `steps.foo`"
-    if let Some(start) = msg.find('`') {
-        if let Some(end) = msg[start + 1..].find('`') {
-            return msg[start + 1..start + 1 + end].to_string();
-        }
+    if let Some(start) = msg.find('`')
+        && let Some(end) = msg[start + 1..].find('`')
+    {
+        return msg[start + 1..start + 1 + end].to_string();
     }
     "unknown".to_string()
 }
