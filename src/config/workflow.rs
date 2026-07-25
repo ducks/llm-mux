@@ -203,9 +203,22 @@ impl WorkflowConfig {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
+        if !is_safe_name(&self.name) {
+            errors.push(format!(
+                "workflow name '{}' must contain only letters, numbers, '.', '_' or '-'",
+                self.name
+            ));
+        }
+
         // Check for duplicate step names
         let mut seen_names = std::collections::HashSet::new();
         for step in &self.steps {
+            if !is_safe_name(&step.name) {
+                errors.push(format!(
+                    "step name '{}' must contain only letters, numbers, '.', '_' or '-'",
+                    step.name
+                ));
+            }
             if !seen_names.insert(&step.name) {
                 errors.push(format!("duplicate step name: {}", step.name));
             }
@@ -227,6 +240,25 @@ impl WorkflowConfig {
 
         // Check step type requirements
         for step in &self.steps {
+            if step.retries > 0 {
+                errors.push(format!(
+                    "step '{}' uses unsupported step-level retries; configure retries on its backend instead",
+                    step.name
+                ));
+            }
+            if step.verify_retries > 0 {
+                errors.push(format!(
+                    "step '{}' uses unsupported verify_retries; add an explicit query/apply correction step",
+                    step.name
+                ));
+            }
+            if step.min_success == Some(0) {
+                errors.push(format!(
+                    "step '{}' min_success must be at least 1",
+                    step.name
+                ));
+            }
+
             match step.step_type {
                 StepType::Shell => {
                     if step.run.is_none() {
@@ -247,9 +279,10 @@ impl WorkflowConfig {
                     }
                 }
                 StepType::Input => {
-                    if step.prompt.is_none() {
-                        errors.push(format!("input step '{}' missing 'prompt' field", step.name));
-                    }
+                    errors.push(format!(
+                        "input step '{}' is not implemented; remove it or use an external approval step",
+                        step.name
+                    ));
                 }
                 StepType::Store => {
                     if step.prompt.is_none() {
@@ -268,6 +301,15 @@ impl WorkflowConfig {
             Err(errors)
         }
     }
+}
+
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
 #[cfg(test)]
@@ -392,5 +434,36 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("nonexistent")));
         assert!(errors.iter().any(|e| e.contains("prompt")));
         assert!(errors.iter().any(|e| e.contains("role")));
+    }
+
+    #[test]
+    fn test_validation_rejects_unimplemented_execution_contracts() {
+        let workflow = WorkflowConfig {
+            name: "unsupported".into(),
+            steps: vec![
+                StepConfig {
+                    name: "retry".into(),
+                    step_type: StepType::Shell,
+                    run: Some("true".into()),
+                    retries: 1,
+                    ..Default::default()
+                },
+                StepConfig {
+                    name: "input".into(),
+                    step_type: StepType::Input,
+                    prompt: Some("Continue?".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let errors = workflow.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("step-level retries"))
+        );
+        assert!(errors.iter().any(|error| error.contains("not implemented")));
     }
 }

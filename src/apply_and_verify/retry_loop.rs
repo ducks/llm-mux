@@ -2,8 +2,8 @@
 
 use super::diff_applier::{ApplyError, ApplyResult, DiffApplier, ModifiedFile};
 use super::edit_parser::{EditParseError, parse_edits};
-use super::rollback::{RollbackStrategy, cleanup_backups, rollback};
-use super::verification::{VerifyError, VerifyResult, run_verify};
+use super::rollback::{RollbackError, RollbackStrategy, cleanup_backups, rollback};
+use super::verification::{VerifyError, VerifyResult, run_verify_cancellable};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -20,6 +20,9 @@ pub enum ApplyVerifyError {
     #[error("verification failed: {0}")]
     VerifyError(#[from] VerifyError),
 
+    #[error("rollback failed: {0}")]
+    RollbackError(#[from] RollbackError),
+
     #[error("verification failed after {attempts} attempts")]
     MaxRetriesExceeded { attempts: u32 },
 
@@ -28,6 +31,11 @@ pub enum ApplyVerifyError {
 
     #[error("source step output not found: {step}")]
     SourceNotFound { step: String },
+
+    #[error(
+        "verification retries require another LLM query and are not supported by apply_and_verify"
+    )]
+    UnsupportedRetries,
 }
 
 /// Configuration for apply-verify cycle
@@ -47,6 +55,8 @@ pub struct ApplyVerifyConfig {
     pub verify_timeout: Option<Duration>,
     /// Prompt template for retry queries
     pub retry_prompt: Option<String>,
+    /// Cancellation shared with the owning workflow.
+    pub cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Default for ApplyVerifyConfig {
@@ -59,6 +69,7 @@ impl Default for ApplyVerifyConfig {
             timeout: None,
             verify_timeout: Some(Duration::from_secs(300)), // 5 minute default
             retry_prompt: None,
+            cancellation: None,
         }
     }
 }
@@ -108,6 +119,10 @@ pub async fn apply_and_verify(
     config: &ApplyVerifyConfig,
     working_dir: &Path,
 ) -> Result<ApplyVerifyResult, ApplyVerifyError> {
+    if config.verify_retries > 0 {
+        return Err(ApplyVerifyError::UnsupportedRetries);
+    }
+
     let start = Instant::now();
     let mut attempts = Vec::new();
     let mut current_output = source_output.to_string();
@@ -125,7 +140,26 @@ pub async fn apply_and_verify(
 
         // Run verification if configured
         let verify_result = if let Some(ref verify_cmd) = config.verify_command {
-            Some(run_verify(verify_cmd, working_dir, config.verify_timeout).await?)
+            match run_verify_cancellable(
+                verify_cmd,
+                working_dir,
+                config.verify_timeout,
+                config.cancellation.as_ref(),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    rollback(
+                        &apply_result.modified_files,
+                        &apply_result.created_files,
+                        config.rollback_strategy,
+                        working_dir,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+            }
         } else {
             None
         };
@@ -158,13 +192,13 @@ pub async fn apply_and_verify(
         }
 
         // Verification failed - rollback and maybe retry
-        let _ = rollback(
+        rollback(
             &apply_result.modified_files,
             &apply_result.created_files,
             config.rollback_strategy,
             working_dir,
         )
-        .await;
+        .await?;
 
         if attempt_num < max_attempts {
             // Prepare retry prompt with error context
@@ -216,7 +250,9 @@ pub async fn apply_only(
 ) -> Result<ApplyResult, ApplyVerifyError> {
     let edits = parse_edits(source_output)?;
     let applier = DiffApplier::new(working_dir);
-    Ok(applier.apply(&edits)?)
+    let result = applier.apply(&edits)?;
+    cleanup_backups(&result.modified_files);
+    Ok(result)
 }
 
 #[cfg(test)]

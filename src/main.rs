@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
                 &*handler,
                 cli.output_file.as_deref(),
                 dry_run,
+                cancel_token.clone(),
             )
             .await
             {

@@ -15,4 +15,4 @@ pub use loader::{LlmuxConfig, ProjectTrust, StepResult, load_workflow};
 #[allow(unused_imports)]
 pub use role::{RoleConfig, RoleExecution, RoleOverride, TeamConfig};
 #[allow(unused_imports)]
-pub use workflow::{OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};
+pub use workflow::{ArgDef, OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};

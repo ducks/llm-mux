@@ -108,6 +108,16 @@ impl EcosystemMemory {
 
     /// Get the default memory database path for an ecosystem
     pub fn default_path(ecosystem: &str) -> Result<PathBuf> {
+        if ecosystem.is_empty()
+            || ecosystem == "."
+            || ecosystem == ".."
+            || !ecosystem
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        {
+            anyhow::bail!("invalid ecosystem name '{}'", ecosystem);
+        }
+
         let config_dir = dirs::config_dir().context("Could not determine config directory")?;
 
         let memory_dir = config_dir.join("llm-mux").join("memory");
