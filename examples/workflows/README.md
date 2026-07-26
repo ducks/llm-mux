@@ -2,6 +2,21 @@
 
 This directory contains example workflows that demonstrate llm-mux capabilities.
 
+## Flagship Workflow
+
+### repository-review.toml
+
+Run independent reviews across every backend in the `default` role, reconcile
+the evidence, and generate a minimal structured patch:
+
+```bash
+llm-mux run repository-review base=origin/main scope=src
+```
+
+This workflow is embedded in the binary, so copying the example is unnecessary.
+It is read-only unless `apply=true` is passed. Applied edits are verified with
+`git diff --check` and rolled back on failure.
+
 ## Knowledge Building Workflows
 
 ### learn-from-pr.toml

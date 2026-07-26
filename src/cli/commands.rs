@@ -2,7 +2,9 @@
 
 use super::output::{OutputEvent, OutputHandler};
 use super::signals::CancellationToken;
-use crate::config::{LlmuxConfig, ProjectTrust, WorkflowConfig, load_workflow};
+use crate::config::{
+    LlmuxConfig, ProjectTrust, WorkflowConfig, available_workflows, load_workflow,
+};
 use crate::role::detect_team;
 use crate::run_ledger::RunLedger;
 use crate::workflow::WorkflowRunner;
@@ -497,6 +499,27 @@ pub fn validate_workflow(
     }
 }
 
+/// List project, user, and built-in workflows.
+pub fn list_workflows(working_dir: &Path, handler: &dyn OutputHandler) -> Result<i32, String> {
+    let workflows = available_workflows(Some(working_dir))
+        .map_err(|error| format!("Failed to list workflows: {error}"))?;
+    if workflows.is_empty() {
+        handler.emit(OutputEvent::Info {
+            message: "No workflows found".into(),
+        });
+    } else {
+        handler.emit(OutputEvent::Info {
+            message: "Available workflows:".into(),
+        });
+        for workflow in workflows {
+            handler.emit(OutputEvent::Info {
+                message: format!("  {workflow}"),
+            });
+        }
+    }
+    Ok(0)
+}
+
 /// Check backend availability
 pub async fn doctor(config: &LlmuxConfig, working_dir: &Path, handler: &dyn OutputHandler) -> i32 {
     handler.emit(OutputEvent::Info {
@@ -872,7 +895,11 @@ pub async fn init_config(
         config_content.push_str("# Basic roles\n");
         config_content.push_str("[roles.default]\n");
         config_content.push_str("description = \"Default role for general queries\"\n");
-        config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+        config_content.push_str(&format!(
+            "backends = {}\n",
+            serde_json::to_string(&detected_backends)
+                .map_err(|error| format!("Failed to serialize backend list: {error}"))?
+        ));
         config_content.push_str("execution = \"first\"\n\n");
     } else if let Some(ptype) = project_type {
         // Project-specific roles

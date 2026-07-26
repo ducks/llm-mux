@@ -303,7 +303,7 @@ impl WorkflowConfig {
     }
 }
 
-fn is_safe_name(name: &str) -> bool {
+pub(super) fn is_safe_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
