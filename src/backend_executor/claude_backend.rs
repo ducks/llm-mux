@@ -1,6 +1,6 @@
 //! Claude API backend executor
 
-use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
+use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};
 use crate::config::BackendConfig;
 use crate::process::MAX_CAPTURE_BYTES;
 use async_trait::async_trait;
@@ -27,11 +27,18 @@ pub struct ClaudeBackend {
 #[derive(Debug, Deserialize)]
 struct ClaudeResponse {
     content: Vec<ContentBlock>,
+    usage: Option<ClaudeUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ContentBlock {
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsage {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
 }
 
 impl ClaudeBackend {
@@ -153,6 +160,7 @@ impl BackendExecutor for ClaudeBackend {
         let claude_response: ClaudeResponse = serde_json::from_slice(&body)
             .map_err(|e| BackendError::parse(format!("Failed to parse response: {}", e)))?;
 
+        let usage = claude_response.usage;
         let text = claude_response
             .content
             .into_iter()
@@ -162,11 +170,19 @@ impl BackendExecutor for ClaudeBackend {
 
         eprintln!("[DEBUG {}] got {} chars response", self.name, text.len());
 
-        Ok(BackendResponse::new(
-            text,
-            self.name.clone(),
-            start.elapsed(),
-        ))
+        let mut response =
+            BackendResponse::new(text, self.name.clone(), start.elapsed()).with_model(&self.model);
+        if let Some(usage) = usage {
+            response = response.with_usage(TokenUsage {
+                prompt_tokens: usage.input_tokens,
+                completion_tokens: usage.output_tokens,
+                total_tokens: usage
+                    .input_tokens
+                    .zip(usage.output_tokens)
+                    .map(|(input, output)| input + output),
+            });
+        }
+        Ok(response)
     }
 
     fn name(&self) -> &str {

@@ -32,3 +32,4 @@ mod state;
 
 pub use ecosystem_detector::detect_ecosystem;
 pub use runner::WorkflowRunner;
+pub use state::WorkflowResult;

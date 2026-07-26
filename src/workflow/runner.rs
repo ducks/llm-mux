@@ -136,6 +136,30 @@ impl WorkflowRunner {
         dry_run: bool,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<WorkflowResult, WorkflowError> {
+        self.run_resuming_with_cancellation(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            cancellation,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// Resume a workflow with successful results restored from a prior run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_resuming_with_cancellation(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
+        completed_steps: HashMap<String, StepResult>,
+    ) -> Result<WorkflowResult, WorkflowError> {
         let timeout_duration = workflow.timeout.map(Duration::from_millis);
         let execution = self.run_inner(
             workflow,
@@ -144,6 +168,7 @@ impl WorkflowRunner {
             team_override,
             dry_run,
             cancellation.clone(),
+            completed_steps,
         );
         tokio::pin!(execution);
 
@@ -161,6 +186,7 @@ impl WorkflowRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         workflow: WorkflowConfig,
@@ -169,6 +195,7 @@ impl WorkflowRunner {
         team_override: Option<&str>,
         dry_run: bool,
         cancellation: tokio_util::sync::CancellationToken,
+        completed_steps: HashMap<String, StepResult>,
     ) -> Result<WorkflowResult, WorkflowError> {
         // Validate workflow first
         self.validate_workflow(&workflow)?;
@@ -184,6 +211,11 @@ impl WorkflowRunner {
 
         // Create state
         let mut state = WorkflowState::new(workflow.clone(), args, working_dir.to_path_buf());
+        for (step_name, result) in completed_steps {
+            if workflow.steps.iter().any(|step| step.name == step_name) && !result.failed {
+                state.add_result(&step_name, result, true);
+            }
+        }
 
         if let Some(ref team_name) = team
             && let Some(team_config) = self.config.teams.get(team_name)
@@ -212,7 +244,11 @@ impl WorkflowRunner {
         let order = self.topological_sort(&workflow)?;
 
         // Execute steps in order
-        for step_name in order {
+        'steps: for step_name in order {
+            if state.has_result(&step_name) {
+                tracing::info!(step = %step_name, "Reusing successful step from prior run");
+                continue;
+            }
             if cancellation.is_cancelled() {
                 return Err(WorkflowError::StepFailed {
                     step: step_name,
@@ -277,7 +313,12 @@ impl WorkflowRunner {
 
                                 results.push(StepResult::failure(error_msg, 0));
                             }
-                            Err(e) => return Err(e.into()),
+                            Err(e) => {
+                                results.push(StepResult::failure(e.to_string(), 0));
+                                let aggregated = self.aggregate_for_each_results(results);
+                                state.add_result(&step_name, aggregated, step.continue_on_error);
+                                break 'steps;
+                            }
                         }
                     }
                     // Clear item after loop
@@ -340,10 +381,8 @@ impl WorkflowRunner {
                                 );
                             }
 
-                            return Err(WorkflowError::StepFailed {
-                                step: step_name.clone(),
-                                message: error_msg,
-                            });
+                            state.add_result(&step_name, StepResult::failure(error_msg, 0), false);
+                            break 'steps;
                         }
                     }
                 }
@@ -487,6 +526,7 @@ impl WorkflowRunner {
         let mut any_failed = false;
         let mut total_duration = 0u64;
         let mut backends = Vec::new();
+        let mut backend_runs = Vec::new();
 
         for result in results {
             if let Some(output) = result.output {
@@ -500,6 +540,7 @@ impl WorkflowRunner {
             }
             total_duration += result.duration_ms;
             backends.extend(result.backends);
+            backend_runs.extend(result.backend_runs);
         }
 
         StepResult {
@@ -514,6 +555,8 @@ impl WorkflowRunner {
             duration_ms: total_duration,
             backend: backends.first().cloned(),
             backends,
+            backend_runs,
+            ..Default::default()
         }
     }
 }
@@ -776,5 +819,51 @@ mod tests {
                 .unwrap()
                 .contains("first_output")
         );
+    }
+
+    #[tokio::test]
+    async fn test_resume_reuses_successful_steps_and_runs_remaining_tail() {
+        let config = Arc::new(create_test_config());
+        let runner = WorkflowRunner::new(config);
+        let workflow = WorkflowConfig {
+            name: "resume".into(),
+            steps: vec![
+                StepConfig {
+                    name: "first".into(),
+                    step_type: StepType::Shell,
+                    run: Some("touch should-not-exist".into()),
+                    ..Default::default()
+                },
+                StepConfig {
+                    name: "second".into(),
+                    step_type: StepType::Shell,
+                    run: Some("printf '%s' {{ steps.first.output }}".into()),
+                    depends_on: vec!["first".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let completed = HashMap::from([(
+            "first".into(),
+            StepResult::success("restored".into(), "shell".into(), 1),
+        )]);
+        let dir = TempDir::new().unwrap();
+        let result = runner
+            .run_resuming_with_cancellation(
+                workflow,
+                HashMap::new(),
+                dir.path(),
+                None,
+                false,
+                tokio_util::sync::CancellationToken::new(),
+                completed,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(!dir.path().join("should-not-exist").exists());
+        assert_eq!(result.step_output("second"), Some("restored"));
     }
 }

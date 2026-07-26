@@ -90,6 +90,25 @@ pub struct StepResult {
 
     /// Backends that executed (for parallel)
     pub backends: Vec<String>,
+
+    /// Fully rendered prompt or command sent to the executor
+    pub rendered_input: Option<String>,
+
+    /// Per-backend execution metadata for query steps
+    pub backend_runs: Vec<BackendRun>,
+}
+
+/// Provider metadata retained for the run ledger.
+#[derive(Debug, Clone, Default)]
+pub struct BackendRun {
+    pub backend: String,
+    pub model: Option<String>,
+    pub duration_ms: u64,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+    pub estimated_cost_usd: Option<f64>,
+    pub error: Option<String>,
 }
 
 impl StepResult {
@@ -187,8 +206,17 @@ impl LlmuxConfig {
             );
         }
 
-        for backend in config.backends.values_mut() {
+        for (name, backend) in &mut config.backends {
             backend.apply_default_timeout(config.defaults.timeout);
+            if backend
+                .input_cost_per_million
+                .is_some_and(|price| !price.is_finite() || price < 0.0)
+                || backend
+                    .output_cost_per_million
+                    .is_some_and(|price| !price.is_finite() || price < 0.0)
+            {
+                anyhow::bail!("backend '{name}' token prices must be finite, non-negative numbers");
+            }
         }
 
         Ok(config)
