@@ -300,12 +300,13 @@ async fn main() -> Result<()> {
             0
         }
 
-        Commands::Workflows => {
-            handler.emit(cli::OutputEvent::Info {
-                message: "(workflow listing not yet implemented)".into(),
-            });
-            0
-        }
+        Commands::Workflows => match commands::list_workflows(&working_dir, &*handler) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                1
+            }
+        },
 
         Commands::Context => {
             handler.emit(cli::OutputEvent::Info {

@@ -284,10 +284,12 @@ impl RoleExecutor {
 
         // Combine outputs for the main output field
         let combined_output = if !outputs.is_empty() {
+            let mut named_outputs = outputs.iter().collect::<Vec<_>>();
+            named_outputs.sort_by_key(|(name, _)| name.as_str());
             Some(
-                outputs
-                    .iter()
-                    .map(|(k, v)| format!("=== {} ===\n{}", k, v))
+                named_outputs
+                    .into_iter()
+                    .map(|(name, output)| format!("=== {name} ===\n{output}"))
                     .collect::<Vec<_>>()
                     .join("\n\n"),
             )
@@ -396,6 +398,8 @@ mod tests {
         assert!(result.outputs.contains_key("echo"));
         assert!(result.outputs.contains_key("echo2"));
         assert_eq!(result.succeeded.len(), 2);
+        let combined = result.output.unwrap();
+        assert!(combined.find("=== echo ===").unwrap() < combined.find("=== echo2 ===").unwrap());
     }
 
     #[tokio::test]

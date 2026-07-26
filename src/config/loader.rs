@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+const REPOSITORY_REVIEW_WORKFLOW: &str =
+    include_str!("../../examples/workflows/repository-review.toml");
+
 /// Top-level llmux configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -406,7 +409,9 @@ pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowC
         }
     }
 
-    // TODO: Check built-in workflows
+    if name == "repository-review" {
+        return parse_workflow(REPOSITORY_REVIEW_WORKFLOW, "built-in repository-review");
+    }
 
     anyhow::bail!("workflow '{}' not found", name)
 }
@@ -414,15 +419,48 @@ pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowC
 fn load_workflow_file(path: &Path) -> Result<WorkflowConfig> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let workflow: WorkflowConfig =
-        toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+    parse_workflow(&contents, &path.display().to_string())
+}
 
+fn parse_workflow(contents: &str, source: &str) -> Result<WorkflowConfig> {
+    let workflow: WorkflowConfig =
+        toml::from_str(contents).with_context(|| format!("parsing {source}"))?;
     // Validate the workflow
     workflow.validate().map_err(|errors| {
         anyhow::anyhow!("workflow validation failed:\n  {}", errors.join("\n  "))
     })?;
 
     Ok(workflow)
+}
+
+/// List workflow names visible from a project, including built-ins.
+pub fn available_workflows(project_dir: Option<&Path>) -> Result<Vec<String>> {
+    let mut names = std::collections::BTreeSet::from(["repository-review".to_string()]);
+    let mut directories = Vec::new();
+    if let Some(project_dir) = project_dir {
+        directories.push(project_dir.join(".llm-mux/workflows"));
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        directories.push(config_dir.join("llm-mux/workflows"));
+    }
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", directory.display()))?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                continue;
+            }
+            if let Some(name) = path.file_stem().and_then(|name| name.to_str())
+                && super::workflow::is_safe_name(name)
+            {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -456,6 +494,37 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|errors| panic!("{}: {}", path.display(), errors.join("; ")));
         }
+    }
+
+    #[test]
+    fn test_repository_review_is_a_valid_builtin() {
+        let workflow =
+            parse_workflow(REPOSITORY_REVIEW_WORKFLOW, "repository-review test").unwrap();
+        assert_eq!(workflow.name, "repository-review");
+        assert_eq!(workflow.steps.len(), 5);
+        assert!(workflow.steps[1].parallel);
+        assert_eq!(
+            workflow.steps.last().unwrap().condition.as_deref(),
+            Some("args.apply == 'true'")
+        );
+    }
+
+    #[test]
+    fn test_available_workflows_includes_builtin_and_project_files() {
+        let dir = TempDir::new().unwrap();
+        let workflows_dir = dir.path().join(".llm-mux/workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        std::fs::write(
+            workflows_dir.join("local-review.toml"),
+            "name = \"local-review\"\n",
+        )
+        .unwrap();
+        std::fs::write(workflows_dir.join("ignore.txt"), "not a workflow").unwrap();
+
+        let names = available_workflows(Some(dir.path())).unwrap();
+        assert!(names.contains(&"repository-review".to_string()));
+        assert!(names.contains(&"local-review".to_string()));
+        assert!(!names.contains(&"ignore".to_string()));
     }
 
     fn backend(command: &str, args: &[&str]) -> BackendConfig {

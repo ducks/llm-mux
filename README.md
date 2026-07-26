@@ -47,6 +47,28 @@ llm-mux run review
 
 No SDK. No Python. No boilerplate. A single Rust binary, a config file, done.
 
+## Built-in repository review
+
+`repository-review` gathers a bounded Git diff, asks every backend in the
+`default` role for an independent review, reconciles the findings with one
+backend, and produces a structured patch.
+
+```bash
+llm-mux run repository-review
+llm-mux run repository-review base=origin/main scope=src
+```
+
+Review and patch generation do not modify the repository. Applying is explicit:
+
+```bash
+llm-mux run repository-review base=origin/main apply=true
+```
+
+Applied edits are transactional and must pass `git diff --check`; otherwise
+they are rolled back. Use `llm-mux runs show <id>` to inspect every model’s
+prompt, output, usage, and cost, or `llm-mux runs resume <id>` after fixing a
+provider or configuration failure.
+
 ## Why llm-mux
 
 You have API keys for Claude, Gemini, and a local Ollama instance. Right now you're copy-pasting the same prompt into each one and manually merging the results. llm-mux removes that entirely.
@@ -97,6 +119,11 @@ api_key = "${OPENAI_API_KEY}"
 Roles map task types to one or more backends:
 
 ```toml
+[roles.default]
+description = "General queries and built-in workflows"
+backends = ["claude", "gemini"]
+execution = "first"
+
 [roles.analyzer]
 description = "Code analysis"
 backends = ["claude", "gemini"]
@@ -112,6 +139,10 @@ description = "Turn findings into one structured patch"
 backends = ["claude"]
 execution = "first"
 ```
+
+`llm-mux init --global` puts every detected backend in the `default` role.
+Ordinary queries use its first backend; workflow steps can opt into parallel
+execution.
 
 ### 3. Create a workflow
 
@@ -203,7 +234,8 @@ Inside prompts and shell commands:
 {{ ecosystem.current_project }}   current project info
 ```
 
-Filters: `shell_escape`, `json`, `join`, `lines`, `trim`, `default`.
+Filters: `shell_escape`, `json`, `join`, `lines`, `trim`, `truncate_chars`,
+`default`.
 
 ## Configuration Reference
 
