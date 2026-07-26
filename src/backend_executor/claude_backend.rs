@@ -2,6 +2,7 @@
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
 use crate::config::BackendConfig;
+use crate::process::MAX_CAPTURE_BYTES;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::env;
@@ -91,32 +92,65 @@ impl BackendExecutor for ClaudeBackend {
             request.prompt.len()
         );
 
-        let response = self
+        let send = self
             .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
-            .send()
-            .await
-            .map_err(|e| BackendError::Unavailable {
-                message: format!("Failed to send request: {}", e),
-            })?;
+            .send();
+
+        let response = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                response = send => response,
+                _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+            }
+        } else {
+            send.await
+        }
+        .map_err(|e| BackendError::Unavailable {
+            message: format!("Failed to send request: {}", e),
+        })?;
 
         let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::execution_failed(
-                Some(status.as_u16() as i32),
-                String::new(),
-                format!("API error {}: {}", status, body),
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_CAPTURE_BYTES as u64)
+        {
+            return Err(BackendError::parse(
+                "Claude response exceeded 16 MiB capture limit",
             ));
         }
 
-        let claude_response: ClaudeResponse = response
-            .json()
-            .await
+        let body = response.bytes();
+        let body = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                body = body => body,
+                _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+            }
+        } else {
+            body.await
+        }
+        .map_err(|error| BackendError::Unavailable {
+            message: format!("Failed to read response: {error}"),
+        })?;
+
+        if body.len() > MAX_CAPTURE_BYTES {
+            return Err(BackendError::parse(
+                "Claude response exceeded 16 MiB capture limit",
+            ));
+        }
+
+        if !status.is_success() {
+            return Err(BackendError::execution_failed(
+                Some(status.as_u16() as i32),
+                String::new(),
+                format!("API error {}: {}", status, String::from_utf8_lossy(&body)),
+            ));
+        }
+
+        let claude_response: ClaudeResponse = serde_json::from_slice(&body)
             .map_err(|e| BackendError::parse(format!("Failed to parse response: {}", e)))?;
 
         let text = claude_response

@@ -181,6 +181,16 @@ impl LlmuxConfig {
             config.merge(project_config);
         }
 
+        if config.defaults.command_wrapper.is_some() {
+            anyhow::bail!(
+                "`defaults.command_wrapper` is not supported; configure the wrapper explicitly as a backend command"
+            );
+        }
+
+        for backend in config.backends.values_mut() {
+            backend.apply_default_timeout(config.defaults.timeout);
+        }
+
         Ok(config)
     }
 
@@ -339,6 +349,16 @@ impl LlmuxConfig {
 /// 2. ~/.config/llm-mux/workflows/{name}.toml (user)
 /// 3. Built-in workflows (embedded)
 pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowConfig> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        anyhow::bail!("invalid workflow name '{}'", name);
+    }
+
     let filename = format!("{}.toml", name);
 
     // Check project workflows
@@ -389,6 +409,25 @@ mod tests {
         assert!(config.backends.is_empty());
         assert!(config.roles.is_empty());
         assert!(config.teams.is_empty());
+    }
+
+    #[test]
+    fn test_all_shipped_workflow_examples_parse_and_validate() {
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/workflows");
+
+        for entry in std::fs::read_dir(examples).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                continue;
+            }
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let workflow: WorkflowConfig = toml::from_str(&contents)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            workflow
+                .validate()
+                .unwrap_or_else(|errors| panic!("{}: {}", path.display(), errors.join("; ")));
+        }
     }
 
     fn backend(command: &str, args: &[&str]) -> BackendConfig {

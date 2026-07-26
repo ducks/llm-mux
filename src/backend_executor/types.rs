@@ -19,6 +19,10 @@ pub enum BackendError {
         partial_output: Option<String>,
     },
 
+    /// Owning workflow was cancelled.
+    #[error("request cancelled")]
+    Cancelled,
+
     /// Rate limited by the provider
     #[error("rate limited, retry after {retry_after:?}")]
     RateLimit { retry_after: Option<Duration> },
@@ -194,6 +198,9 @@ pub struct BackendRequest {
 
     /// System prompt (if supported)
     pub system_prompt: Option<String>,
+
+    /// Cancellation shared with the owning workflow.
+    pub cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl BackendRequest {
@@ -205,6 +212,7 @@ impl BackendRequest {
             working_dir: None,
             timeout: None,
             system_prompt: None,
+            cancellation: None,
         }
     }
 
@@ -229,6 +237,12 @@ impl BackendRequest {
     /// Set system prompt
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Cancel this request when the owning workflow is cancelled.
+    pub fn with_cancellation(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = Some(token);
         self
     }
 }

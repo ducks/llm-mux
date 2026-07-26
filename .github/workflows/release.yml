@@ -6,8 +6,24 @@ on:
       - "v*"
 
 jobs:
+  quality:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          components: clippy,rustfmt
+
+      - run: cargo fmt -- --check
+      - run: cargo test --all-targets
+      - run: cargo clippy --all-targets -- -D warnings
+
   build:
     name: Build ${{ matrix.target }}
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -34,6 +50,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.1
           targets: ${{ matrix.target }}
 
       - name: Install cross

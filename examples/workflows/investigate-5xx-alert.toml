@@ -29,7 +29,7 @@ run = """
 # Get cluster/server configuration
 # CUSTOMIZE: Replace with your infrastructure config lookup
 echo "=== Cluster Configuration ==="
-echo "Cluster: {{ args.cluster }}"
+echo Cluster: {{ args.cluster }}
 echo "Investigating production server for 5xx errors"
 """
 
@@ -110,7 +110,7 @@ timeout = 60000
 depends_on = ["extract_code_references"]
 run = """
 echo "=== Code Investigation ==="
-CODE_REFS='{{ steps.extract_code_references.output }}'
+CODE_REFS={{ steps.extract_code_references.output }}
 
 # CUSTOMIZE: Replace with your codebase path
 CODEBASE_PATH="$HOME/your-app"
@@ -146,7 +146,7 @@ fi
 name = "analyze_patterns"
 type = "query"
 role = "analyzer"
-depends_on = ["get_cluster_info", "check_discourse_logs", "check_sidekiq_status", "search_related_alerts", "investigate_code"]
+depends_on = ["get_cluster_info", "check_discourse_logs", "check_queue_status", "search_related_alerts", "investigate_code"]
 timeout = 120000
 prompt = """
 You are investigating a high 5xx error rate alert for cluster {{ args.cluster }}.
@@ -166,8 +166,8 @@ Note: This alert has a 12-minute lag due to Cloudwatch scraping.
 ## Recent Application Logs (errors/warnings)
 {{ steps.check_discourse_logs.output }}
 
-## Sidekiq Queue Status
-{{ steps.check_sidekiq_status.output }}
+## Background Queue Status
+{{ steps.check_queue_status.output }}
 
 ## Related Patterns from Knowledge Base
 {{ steps.search_related_alerts.output }}

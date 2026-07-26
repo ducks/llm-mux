@@ -1,10 +1,12 @@
 //! Process utilities for child process management.
 
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+
+pub(crate) const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 
 fn exit_status_code_parts(code: Option<i32>, _signal: Option<i32>) -> Option<i32> {
     if let Some(code) = code {
@@ -72,6 +74,65 @@ pub(crate) enum OutputWaitError {
     },
 }
 
+/// Configure a child so dropping its future cannot leave the direct process
+/// running. On Unix each child also becomes the leader of a fresh process
+/// group, allowing timeout and cancellation paths to terminate descendants.
+pub(crate) fn configure_child_process(command: &mut Command) {
+    command.kill_on_drop(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+}
+
+/// Build the platform's command-shell invocation for a script.
+pub(crate) fn shell_command(script: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/D", "/S", "/C", script]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+}
+
+/// Terminate a child and, on Unix, every descendant in its process group.
+pub(crate) async fn terminate_child_process(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--"])
+            .arg(format!("-{pid}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let _ = Command::new("taskkill")
+            .args(["/PID"])
+            .arg(pid.to_string())
+            .args(["/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 /// Wait for child output, reading stdout/stderr concurrently to avoid deadlock.
 pub(crate) async fn wait_for_child_output(
     child: &mut Child,
@@ -80,24 +141,44 @@ pub(crate) async fn wait_for_child_output(
     let stderr_pipe = child.stderr.take();
 
     let stdout_fut = async move {
-        if let Some(mut out) = stdout_pipe {
-            let mut buf = String::new();
-            out.read_to_string(&mut buf)
+        if let Some(out) = stdout_pipe {
+            let mut buf = Vec::new();
+            out.take((MAX_CAPTURE_BYTES + 1) as u64)
+                .read_to_end(&mut buf)
                 .await
-                .map(|_| buf)
-                .map_err(|e| (OutputStream::Stdout, e))
+                .map_err(|e| (OutputStream::Stdout, e))?;
+            if buf.len() > MAX_CAPTURE_BYTES {
+                return Err((
+                    OutputStream::Stdout,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stdout exceeded 16 MiB capture limit",
+                    ),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&buf).into_owned())
         } else {
             Ok(String::new())
         }
     };
 
     let stderr_fut = async move {
-        if let Some(mut err) = stderr_pipe {
-            let mut buf = String::new();
-            err.read_to_string(&mut buf)
+        if let Some(err) = stderr_pipe {
+            let mut buf = Vec::new();
+            err.take((MAX_CAPTURE_BYTES + 1) as u64)
+                .read_to_end(&mut buf)
                 .await
-                .map(|_| buf)
-                .map_err(|e| (OutputStream::Stderr, e))
+                .map_err(|e| (OutputStream::Stderr, e))?;
+            if buf.len() > MAX_CAPTURE_BYTES {
+                return Err((
+                    OutputStream::Stderr,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stderr exceeded 16 MiB capture limit",
+                    ),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&buf).into_owned())
         } else {
             Ok(String::new())
         }
@@ -240,7 +321,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_wait_for_child_output_read_error() {
+    async fn test_wait_for_child_output_replaces_invalid_utf8() {
         let mut child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg("printf '\\xff'")
@@ -249,12 +330,9 @@ mod tests {
             .expect("failed to spawn");
 
         let result = wait_for_child_output(&mut child).await;
-        assert!(result.is_err());
-        if let Err(OutputWaitError::Read { stream, .. }) = result {
-            assert!(matches!(stream, OutputStream::Stdout));
-        } else {
-            panic!("Expected Read error, got {:?}", result);
-        }
+        let (stdout, _, status) = result.unwrap();
+        assert_eq!(stdout, "\u{fffd}");
+        assert!(status.success());
     }
 
     #[cfg(unix)]

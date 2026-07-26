@@ -1,4 +1,3 @@
-// TODO: Wire up apply_and_verify to workflow runner for `type = "apply"` steps
 #![allow(dead_code)]
 
 //! Apply and verify module for llmux
@@ -9,7 +8,7 @@
 //! - Creating backups before modifications
 //! - Running verification commands
 //! - Rollback on verification failure
-//! - Retry loop with error context
+//! - Transactional rollback on apply or verification failure
 //!
 //! # Example
 //!
@@ -18,7 +17,7 @@
 //!
 //! let config = ApplyVerifyConfig {
 //!     verify_command: Some("cargo test".into()),
-//!     verify_retries: 2,
+//!     verify_retries: 0,
 //!     ..Default::default()
 //! };
 //!

@@ -4,10 +4,12 @@ use super::edit_parser::{DiffHunk, DiffLine, EditOperation, normalize_whitespace
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// Maximum line drift for fuzzy hunk matching
 const MAX_LINE_DRIFT: usize = 3;
+static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Errors during diff application
 #[derive(Debug, Error)]
@@ -37,6 +39,12 @@ pub enum ApplyError {
         "refusing to edit path '{path}' outside the working directory (edits are confined to the project tree)"
     )]
     PathEscape { path: PathBuf },
+
+    #[error("apply failed: {apply_error}; rollback also failed: {rollback_errors}")]
+    RollbackFailed {
+        apply_error: String,
+        rollback_errors: String,
+    },
 }
 
 /// Result of applying edits
@@ -149,15 +157,15 @@ impl DiffApplier {
         })?;
 
         for edit in edits {
-            match edit {
+            let result = (|| match edit {
                 EditOperation::UnifiedDiff { path, hunks } => {
                     let full_path = self.resolve_path(path)?;
                     let backup = self.create_backup(&full_path)?;
-                    self.apply_unified_diff(&full_path, hunks)?;
                     modified_files.push(ModifiedFile {
-                        path: full_path,
+                        path: full_path.clone(),
                         backup_path: backup,
                     });
+                    self.apply_unified_diff(&full_path, hunks)
                 }
                 EditOperation::OldNewPair { path, old, new } => {
                     let full_path = self.resolve_path(path)?;
@@ -169,18 +177,20 @@ impl DiffApplier {
                                 source: e,
                             })?;
                         }
+                        // Track the file before writing so a partial write is
+                        // removed if this operation fails.
+                        created_files.push(full_path.clone());
                         fs::write(&full_path, new).map_err(|e| ApplyError::WriteError {
                             path: full_path.clone(),
                             source: e,
-                        })?;
-                        created_files.push(full_path);
+                        })
                     } else {
                         let backup = self.create_backup(&full_path)?;
-                        self.apply_old_new(&full_path, old, new)?;
                         modified_files.push(ModifiedFile {
-                            path: full_path,
+                            path: full_path.clone(),
                             backup_path: backup,
                         });
+                        self.apply_old_new(&full_path, old, new)
                     }
                 }
                 EditOperation::FullFile { path, content } => {
@@ -204,8 +214,20 @@ impl DiffApplier {
                     fs::write(&full_path, content).map_err(|e| ApplyError::WriteError {
                         path: full_path,
                         source: e,
-                    })?;
+                    })
                 }
+            })();
+
+            if let Err(apply_error) = result {
+                if let Err(rollback_errors) =
+                    Self::rollback_partial(&modified_files, &created_files)
+                {
+                    return Err(ApplyError::RollbackFailed {
+                        apply_error: apply_error.to_string(),
+                        rollback_errors,
+                    });
+                }
+                return Err(apply_error);
             }
         }
 
@@ -213,6 +235,42 @@ impl DiffApplier {
             modified_files,
             created_files,
         })
+    }
+
+    fn rollback_partial(
+        modified_files: &[ModifiedFile],
+        created_files: &[PathBuf],
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+
+        for file in modified_files.iter().rev() {
+            if let Err(error) = fs::copy(&file.backup_path, &file.path) {
+                errors.push(format!("restore {}: {}", file.path.display(), error));
+            }
+            if let Err(error) = fs::remove_file(&file.backup_path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                errors.push(format!(
+                    "remove backup {}: {}",
+                    file.backup_path.display(),
+                    error
+                ));
+            }
+        }
+
+        for path in created_files.iter().rev() {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                errors.push(format!("remove created file {}: {}", path.display(), error));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     /// Create a backup of a file before modification
@@ -231,8 +289,15 @@ impl DiffApplier {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
-        let backup_name = format!("{}.{}", filename, timestamp);
+            .as_nanos();
+        let sequence = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let backup_name = format!(
+            "{}.{}.{}.{}",
+            filename,
+            std::process::id(),
+            timestamp,
+            sequence
+        );
         let backup_path = self.backup_dir.join(backup_name);
 
         fs::copy(path, &backup_path).map_err(|e| ApplyError::BackupError {
@@ -595,6 +660,70 @@ mod tests {
 
         let result = applier.apply(&edits);
         assert!(matches!(result, Err(ApplyError::OldTextNotFound { .. })));
+    }
+
+    #[test]
+    fn test_batch_failure_rolls_back_prior_modifications_and_creations() {
+        let dir = TempDir::new().unwrap();
+        let existing = setup_test_file(dir.path(), "existing.rs", "original");
+        let created = dir.path().join("created.rs");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: "original".into(),
+                new: "modified".into(),
+            },
+            EditOperation::FullFile {
+                path: PathBuf::from("created.rs"),
+                content: "created".into(),
+            },
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: "not present".into(),
+                new: "never written".into(),
+            },
+        ];
+
+        assert!(applier.apply(&edits).is_err());
+        assert_eq!(fs::read_to_string(existing).unwrap(), "original");
+        assert!(!created.exists());
+    }
+
+    #[test]
+    fn test_same_named_files_get_distinct_backups() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("one")).unwrap();
+        fs::create_dir_all(dir.path().join("two")).unwrap();
+        setup_test_file(&dir.path().join("one"), "mod.rs", "one");
+        setup_test_file(&dir.path().join("two"), "mod.rs", "two");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![
+            EditOperation::FullFile {
+                path: PathBuf::from("one/mod.rs"),
+                content: "changed one".into(),
+            },
+            EditOperation::FullFile {
+                path: PathBuf::from("two/mod.rs"),
+                content: "changed two".into(),
+            },
+        ];
+
+        let result = applier.apply(&edits).unwrap();
+        assert_ne!(
+            result.modified_files[0].backup_path,
+            result.modified_files[1].backup_path
+        );
+        assert_eq!(
+            fs::read_to_string(&result.modified_files[0].backup_path).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(&result.modified_files[1].backup_path).unwrap(),
+            "two"
+        );
     }
 
     #[test]

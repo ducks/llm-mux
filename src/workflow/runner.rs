@@ -11,6 +11,7 @@ use minijinja::value::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Errors during workflow execution
@@ -30,6 +31,12 @@ pub enum WorkflowError {
 
     #[error("template error: {0}")]
     Template(#[from] crate::template::TemplateError),
+
+    #[error("workflow timed out after {0:?}")]
+    Timeout(Duration),
+
+    #[error("workflow validation failed:\n  {0}")]
+    InvalidConfiguration(String),
 }
 
 /// Workflow runner
@@ -45,8 +52,8 @@ impl WorkflowRunner {
 
     /// Create output directory for workflow run
     fn create_output_dir(workflow_name: &str) -> Result<PathBuf, WorkflowError> {
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let dir_name = format!("{}-{}", workflow_name, timestamp);
+        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%f");
+        let dir_name = format!("{}-{}-{}", workflow_name, timestamp, std::process::id());
 
         let output_dir = std::env::temp_dir()
             .join("llm-mux")
@@ -57,6 +64,17 @@ impl WorkflowRunner {
             step: "create_output_dir".into(),
             message: format!("Failed to create output directory: {}", e),
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| WorkflowError::StepFailed {
+                    step: "create_output_dir".into(),
+                    message: format!("Failed to secure output directory: {}", e),
+                },
+            )?;
+        }
 
         tracing::info!(path = %output_dir.display(), "Created workflow output directory");
         Ok(output_dir)
@@ -88,6 +106,7 @@ impl WorkflowRunner {
     }
 
     /// Run a workflow
+    #[allow(dead_code)]
     pub async fn run(
         &self,
         workflow: WorkflowConfig,
@@ -95,6 +114,61 @@ impl WorkflowRunner {
         working_dir: &Path,
         team_override: Option<&str>,
         dry_run: bool,
+    ) -> Result<WorkflowResult, WorkflowError> {
+        self.run_with_cancellation(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Run a workflow tied to a caller-owned cancellation token.
+    pub async fn run_with_cancellation(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<WorkflowResult, WorkflowError> {
+        let timeout_duration = workflow.timeout.map(Duration::from_millis);
+        let execution = self.run_inner(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            cancellation.clone(),
+        );
+        tokio::pin!(execution);
+
+        if let Some(duration) = timeout_duration {
+            tokio::select! {
+                result = &mut execution => result,
+                _ = tokio::time::sleep(duration) => {
+                    cancellation.cancel();
+                    let _ = execution.await;
+                    Err(WorkflowError::Timeout(duration))
+                }
+            }
+        } else {
+            execution.await
+        }
+    }
+
+    async fn run_inner(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<WorkflowResult, WorkflowError> {
         // Validate workflow first
         self.validate_workflow(&workflow)?;
@@ -128,13 +202,23 @@ impl WorkflowRunner {
         }
 
         // Create execution context
-        let ctx = ExecutionContext::new(self.config.clone(), dry_run);
+        let ctx = ExecutionContext::new_with_cancellation(
+            self.config.clone(),
+            dry_run,
+            Some(cancellation.clone()),
+        );
 
         // Get execution order
         let order = self.topological_sort(&workflow)?;
 
         // Execute steps in order
         for step_name in order {
+            if cancellation.is_cancelled() {
+                return Err(WorkflowError::StepFailed {
+                    step: step_name,
+                    message: "workflow cancelled".into(),
+                });
+            }
             if state.failed && !workflow.continue_on_error {
                 break;
             }
@@ -293,7 +377,9 @@ impl WorkflowRunner {
             }
         }
 
-        Ok(())
+        workflow
+            .validate()
+            .map_err(|errors| WorkflowError::InvalidConfiguration(errors.join("\n  ")))
     }
 
     /// Topological sort of steps based on dependencies
@@ -520,6 +606,31 @@ mod tests {
         assert_eq!(result.steps.len(), 2);
         assert!(result.step_output("step1").is_some());
         assert!(result.step_output("step2").is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_workflow_timeout_is_enforced() {
+        let config = Arc::new(create_test_config());
+        let runner = WorkflowRunner::new(config);
+        let workflow = WorkflowConfig {
+            name: "timeout".into(),
+            timeout: Some(50),
+            steps: vec![StepConfig {
+                name: "slow".into(),
+                step_type: StepType::Shell,
+                run: Some("sleep 1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dir = TempDir::new().unwrap();
+
+        let result = runner
+            .run(workflow, HashMap::new(), dir.path(), None, false)
+            .await;
+
+        assert!(matches!(result, Err(WorkflowError::Timeout(_))));
     }
 
     #[test]

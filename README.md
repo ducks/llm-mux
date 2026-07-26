@@ -21,11 +21,24 @@ prompt = "Review these changes:\n\n{{ steps.diff.output }}"
 depends_on = ["diff"]
 
 [[steps]]
+name = "synthesize"
+type = "query"
+role = "coder"
+prompt = """
+Turn these reviews into one minimal patch.
+Return only a unified diff or a JSON edits array:
+
+{{ steps.analyze.output }}
+"""
+depends_on = ["analyze"]
+
+[[steps]]
 name = "fix"
 type = "apply"
-source = "analyze"
+source = "synthesize"
 verify = "cargo test"   # rolls back if tests fail
-depends_on = ["analyze"]
+rollback_on_failure = true
+depends_on = ["synthesize"]
 ```
 
 ```bash
@@ -42,7 +55,7 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Chain steps together** - shell commands, LLM queries, file edits, and verification steps compose naturally
 - **Apply and verify** - LLM suggests edits, llm-mux applies them, runs your test suite, rolls back on failure
 - **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
-- **Works anywhere** - single binary, no runtime dependencies, runs in CI
+- **Works anywhere** - single binary with direct HTTP support; CLI backends use their corresponding installed tools
 
 ## Install
 
@@ -91,6 +104,11 @@ execution = "parallel"    # first | parallel | fallback
 [roles.quick]
 description = "Fast local queries"
 backends = ["ollama"]
+execution = "first"
+
+[roles.coder]
+description = "Turn findings into one structured patch"
+backends = ["claude"]
 execution = "first"
 ```
 
@@ -156,7 +174,6 @@ name = "fix"
 type = "apply"
 source = "analyze"
 verify = "cargo test"
-verify_retries = 2
 rollback_on_failure = true
 depends_on = ["analyze"]
 ```
@@ -296,12 +313,8 @@ role = "coder"
 prompt = """
 Fix this bug: {{ steps.identify.output }}
 
-Return the edit as:
-<<<
-old code
-===
-new code
->>>
+Return only JSON in this format:
+{"edits":[{"path":"src/file.rs","old":"exact old text","new":"replacement text"}]}
 """
 depends_on = ["identify"]
 
@@ -327,7 +340,7 @@ name = "review-each"
 type = "query"
 role = "analyzer"
 for_each = "steps.list.output | lines"
-prompt = "Review {{ item }}:\n\n{{ steps.read.output }}"
+prompt = "Review the changed file {{ item }}. Inspect it in the working tree."
 depends_on = ["list"]
 ```
 

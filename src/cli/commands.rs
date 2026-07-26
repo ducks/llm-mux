@@ -1,7 +1,8 @@
 //! CLI command implementations
 
 use super::output::{OutputEvent, OutputHandler};
-use crate::config::{LlmuxConfig, load_workflow};
+use super::signals::CancellationToken;
+use crate::config::{LlmuxConfig, WorkflowConfig, load_workflow};
 use crate::role::detect_team;
 use crate::workflow::WorkflowRunner;
 use std::collections::HashMap;
@@ -131,13 +132,14 @@ pub async fn run_workflow(
     handler: &dyn OutputHandler,
     output_file: Option<&Path>,
     dry_run: bool,
+    cancellation: CancellationToken,
 ) -> Result<i32, String> {
     // Load workflow
     let workflow = load_workflow(workflow_name, Some(working_dir))
         .map_err(|e| format!("Failed to load workflow '{}': {}", workflow_name, e))?;
 
     // Parse workflow args (simple key=value for now)
-    let parsed_args = parse_workflow_args(&args);
+    let parsed_args = resolve_workflow_args(&workflow, &args)?;
 
     if dry_run {
         handler.emit(OutputEvent::Info {
@@ -154,12 +156,13 @@ pub async fn run_workflow(
     let runner = WorkflowRunner::new(config.clone());
 
     let result = runner
-        .run(
+        .run_with_cancellation(
             workflow.clone(),
             parsed_args,
             working_dir,
             team_override,
             dry_run,
+            cancellation,
         )
         .await
         .map_err(|e| format!("Workflow execution failed: {}", e))?;
@@ -184,12 +187,13 @@ pub async fn run_workflow(
         })
         .or_else(|| result.steps.get("final").and_then(|s| s.output.as_deref()))
         .or_else(|| {
-            // Fallback: get any step with output (last by hash iteration)
-            result
-                .steps
-                .values()
-                .filter_map(|s| s.output.as_deref())
-                .last()
+            // Deterministic fallback: last declared step that produced output.
+            workflow.steps.iter().rev().find_map(|step| {
+                result
+                    .steps
+                    .get(&step.name)
+                    .and_then(|result| result.output.as_deref())
+            })
         });
 
     // Write to file if specified
@@ -207,21 +211,14 @@ pub async fn run_workflow(
 
     handler.result(result.success, final_output);
 
-    // Always write final output to console AND file if present
+    // Always write final output to console. Per-step outputs already live in
+    // the runner's private, unique artifact directory.
     if let Some(output) = final_output {
         eprintln!("\n=== Workflow Output ===");
         println!("{}", output);
-
-        // ALWAYS write to a temp file so we don't lose reports
-        let report_file = std::env::temp_dir()
-            .join(format!("llm-mux-{}-report.txt", workflow_name))
-            .display()
-            .to_string();
-        if let Err(e) = std::fs::write(&report_file, output) {
-            eprintln!("Warning: Failed to write report to {}: {}", report_file, e);
-        } else {
-            eprintln!("\nReport saved to: {}", report_file);
-        }
+    }
+    if let Some(output_dir) = result.output_dir.as_deref() {
+        eprintln!("\nWorkflow artifacts saved to: {}", output_dir);
     }
 
     Ok(if result.success { 0 } else { 1 })
@@ -241,6 +238,40 @@ fn parse_workflow_args(args: &[String]) -> HashMap<String, String> {
     }
 
     parsed
+}
+
+fn resolve_workflow_args(
+    workflow: &WorkflowConfig,
+    args: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut resolved = workflow
+        .args
+        .iter()
+        .filter_map(|(name, definition)| {
+            definition
+                .default
+                .as_ref()
+                .map(|value| (name.clone(), value.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    resolved.extend(parse_workflow_args(args));
+
+    let missing = workflow
+        .args
+        .iter()
+        .filter(|(name, definition)| definition.required && !resolved.contains_key(*name))
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Missing required workflow argument(s): {}. Pass values as name=value.",
+            missing.join(", ")
+        ))
+    }
 }
 
 /// Validate a workflow
@@ -771,6 +802,40 @@ mod tests {
 
         assert_eq!(parsed.get("arg0"), Some(&"positional".to_string()));
         assert_eq!(parsed.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_workflow_args_applies_defaults_and_checks_required() {
+        let mut workflow = WorkflowConfig::default();
+        workflow.args.insert(
+            "required".into(),
+            crate::config::ArgDef {
+                required: true,
+                default: None,
+                description: String::new(),
+            },
+        );
+        workflow.args.insert(
+            "optional".into(),
+            crate::config::ArgDef {
+                required: false,
+                default: Some("default value".into()),
+                description: String::new(),
+            },
+        );
+
+        let missing = resolve_workflow_args(&workflow, &[]).unwrap_err();
+        assert!(missing.contains("required"));
+
+        let resolved = resolve_workflow_args(&workflow, &["required=provided".into()]).unwrap();
+        assert_eq!(
+            resolved.get("required").map(String::as_str),
+            Some("provided")
+        );
+        assert_eq!(
+            resolved.get("optional").map(String::as_str),
+            Some("default value")
+        );
     }
 
     #[test]

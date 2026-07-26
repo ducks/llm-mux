@@ -41,12 +41,16 @@ pub fn shell_escape_str(s: &str) -> String {
 
 /// Shell-escape a minijinja Value (used by auto-escape formatter).
 pub fn shell_escape_value(_state: &State, value: Value) -> Result<Value, Error> {
-    Ok(Value::from(shell_escape_str(&value.to_string())))
+    Ok(Value::from_safe_string(shell_escape_str(
+        &value.to_string(),
+    )))
 }
 
 /// Filter: escape a string for safe shell interpolation.
 fn filter_shell_escape(_state: &State, value: Value) -> Result<Value, Error> {
-    Ok(Value::from(shell_escape_str(&value.to_string())))
+    Ok(Value::from_safe_string(shell_escape_str(
+        &value.to_string(),
+    )))
 }
 
 /// Serialize value to JSON string

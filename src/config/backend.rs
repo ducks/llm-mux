@@ -99,6 +99,12 @@ impl Default for BackendConfig {
 }
 
 impl BackendConfig {
+    pub(crate) fn apply_default_timeout(&mut self, timeout: u64) {
+        if self.timeout == default_timeout() {
+            self.timeout = timeout;
+        }
+    }
+
     /// Returns true if this is the Claude API backend
     pub fn is_claude_api(&self) -> bool {
         self.backend_type.as_deref() == Some("claude-api")
