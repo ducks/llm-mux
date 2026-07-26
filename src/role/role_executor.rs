@@ -2,8 +2,9 @@
 
 //! Execute roles across backends with different execution modes
 
+use crate::backend_executor::BackendResponse;
 use crate::backend_executor::{BackendExecutor, BackendRequest, create_executor_with_retry};
-use crate::config::{LlmuxConfig, RoleExecution, StepResult};
+use crate::config::{BackendRun, LlmuxConfig, RoleExecution, StepResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +53,9 @@ pub struct RoleResult {
 
     /// Execution mode used
     pub execution_mode: RoleExecution,
+
+    /// Per-provider usage, model, cost, and failure metadata
+    pub backend_runs: Vec<BackendRun>,
 }
 
 impl RoleResult {
@@ -72,6 +76,8 @@ impl RoleResult {
             duration_ms: self.duration.as_millis() as u64,
             backend: self.succeeded.first().cloned(),
             backends: self.succeeded.clone(),
+            backend_runs: self.backend_runs.clone(),
+            ..Default::default()
         }
     }
 }
@@ -85,6 +91,39 @@ impl RoleExecutor {
     /// Create a new role executor
     pub fn new(config: Arc<LlmuxConfig>) -> Self {
         Self { config }
+    }
+
+    fn successful_backend_run(&self, response: &BackendResponse) -> BackendRun {
+        let usage = response.usage.as_ref();
+        let backend_config = self.config.backends.get(&response.backend);
+        let prompt_tokens = usage.and_then(|usage| usage.prompt_tokens);
+        let completion_tokens = usage.and_then(|usage| usage.completion_tokens);
+        let estimated_cost_usd = backend_config.and_then(|config| {
+            let input = prompt_tokens
+                .zip(config.input_cost_per_million)
+                .map(|(tokens, rate)| f64::from(tokens) * rate / 1_000_000.0);
+            let output = completion_tokens
+                .zip(config.output_cost_per_million)
+                .map(|(tokens, rate)| f64::from(tokens) * rate / 1_000_000.0);
+            match (input, output) {
+                (None, None) => None,
+                (input, output) => Some(input.unwrap_or(0.0) + output.unwrap_or(0.0)),
+            }
+        });
+
+        BackendRun {
+            backend: response.backend.clone(),
+            model: response
+                .model
+                .clone()
+                .or_else(|| backend_config.and_then(|config| config.model.clone())),
+            duration_ms: response.duration.as_millis() as u64,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: usage.and_then(|usage| usage.total_tokens),
+            estimated_cost_usd,
+            error: None,
+        }
     }
 
     /// Execute a resolved role with a prompt
@@ -107,7 +146,7 @@ impl RoleExecutor {
         request: &BackendRequest,
     ) -> Result<RoleResult, ExecutionError> {
         let start = Instant::now();
-        let mut failed = HashMap::new();
+        let mut failed: HashMap<String, String> = HashMap::new();
 
         for backend_name in &role.backends {
             if let Some(backend_config) = self.config.backends.get(backend_name) {
@@ -119,6 +158,15 @@ impl RoleExecutor {
 
                 match executor.execute(request).await {
                     Ok(response) => {
+                        let mut backend_runs = failed
+                            .iter()
+                            .map(|(backend, error)| BackendRun {
+                                backend: backend.clone(),
+                                error: Some(error.clone()),
+                                ..Default::default()
+                            })
+                            .collect::<Vec<_>>();
+                        backend_runs.push(self.successful_backend_run(&response));
                         return Ok(RoleResult {
                             output: Some(response.text),
                             outputs: HashMap::new(),
@@ -126,6 +174,7 @@ impl RoleExecutor {
                             failed,
                             duration: start.elapsed(),
                             execution_mode: RoleExecution::First,
+                            backend_runs,
                         });
                     }
                     Err(e) => {
@@ -191,19 +240,33 @@ impl RoleExecutor {
         let mut outputs = HashMap::new();
         let mut succeeded = Vec::new();
         let mut failed = HashMap::new();
+        let mut backend_runs = Vec::new();
 
         for handle in handles {
             match handle.await {
                 Ok((name, Ok(response))) => {
+                    backend_runs.push(self.successful_backend_run(&response));
                     outputs.insert(name.clone(), response.text);
                     succeeded.push(name);
                 }
                 Ok((name, Err(e))) => {
-                    failed.insert(name, e.to_string());
+                    let error = e.to_string();
+                    backend_runs.push(BackendRun {
+                        backend: name.clone(),
+                        error: Some(error.clone()),
+                        ..Default::default()
+                    });
+                    failed.insert(name, error);
                 }
                 Err(e) => {
                     // Task panicked or was cancelled
-                    failed.insert("unknown".into(), e.to_string());
+                    let error = e.to_string();
+                    backend_runs.push(BackendRun {
+                        backend: "unknown".into(),
+                        error: Some(error.clone()),
+                        ..Default::default()
+                    });
+                    failed.insert("unknown".into(), error);
                 }
             }
         }
@@ -239,6 +302,7 @@ impl RoleExecutor {
             failed,
             duration: start.elapsed(),
             execution_mode: RoleExecution::Parallel,
+            backend_runs,
         })
     }
 }
@@ -380,6 +444,7 @@ mod tests {
             failed: HashMap::new(),
             duration: Duration::from_secs(1),
             execution_mode: RoleExecution::First,
+            backend_runs: Vec::new(),
         };
 
         let step_result = role_result.to_step_result();

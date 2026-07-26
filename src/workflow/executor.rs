@@ -113,6 +113,7 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: None,
                 backends: Vec::new(),
+                ..Default::default()
             });
         }
     }
@@ -132,6 +133,8 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: Some("shell".into()),
                 backends: vec!["shell".into()],
+                rendered_input: Some(rendered),
+                ..Default::default()
             })
         }
         StepType::Apply if ctx.dry_run => {
@@ -152,6 +155,8 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: Some("apply".into()),
                 backends: vec!["apply".into()],
+                rendered_input: Some(format!("source={source}{verify}")),
+                ..Default::default()
             })
         }
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
@@ -287,6 +292,8 @@ async fn execute_shell_step(
                     duration_ms,
                     backend: Some("shell".into()),
                     backends: vec!["shell".into()],
+                    rendered_input: Some(rendered_command.clone()),
+                    ..Default::default()
                 });
             }
             return Err(StepExecutionError::ShellTimeout(dur));
@@ -307,6 +314,8 @@ async fn execute_shell_step(
             duration_ms,
             backend: Some("shell".into()),
             backends: vec!["shell".into()],
+            rendered_input: Some(rendered_command.clone()),
+            ..Default::default()
         })
     } else {
         let error_msg = if stderr.is_empty() {
@@ -324,6 +333,8 @@ async fn execute_shell_step(
                 duration_ms,
                 backend: Some("shell".into()),
                 backends: vec!["shell".into()],
+                rendered_input: Some(rendered_command),
+                ..Default::default()
             })
         } else {
             Err(StepExecutionError::ShellFailed {
@@ -382,7 +393,7 @@ async fn execute_query_step(
 
     // Create backend request
     let mut request =
-        BackendRequest::new(rendered_prompt).with_working_dir(working_dir.to_path_buf());
+        BackendRequest::new(rendered_prompt.clone()).with_working_dir(working_dir.to_path_buf());
     if let Some(timeout_ms) = step.timeout {
         request = request.with_timeout(Duration::from_millis(timeout_ms));
     }
@@ -393,6 +404,7 @@ async fn execute_query_step(
     // Execute
     let result = ctx.role_executor.execute(&resolved_role, &request).await?;
     let mut step_result = result.to_step_result();
+    step_result.rendered_input = Some(rendered_prompt);
 
     // Validate against schema if present
     if let Some(ref schema) = step.output_schema {
@@ -604,6 +616,8 @@ async fn execute_apply_step(
             duration_ms: start.elapsed().as_millis() as u64,
             backend: Some("apply".into()),
             backends: vec!["apply".into()],
+            rendered_input: Some(format!("source={source_step}")),
+            ..Default::default()
         })
     } else {
         let result = apply_only(source_output, working_dir).await?;
@@ -619,6 +633,8 @@ async fn execute_apply_step(
             duration_ms: start.elapsed().as_millis() as u64,
             backend: Some("apply".into()),
             backends: vec!["apply".into()],
+            rendered_input: Some(format!("source={source_step}")),
+            ..Default::default()
         })
     }
 }
@@ -676,6 +692,8 @@ async fn execute_store_step(
         duration_ms: start.elapsed().as_millis() as u64,
         backend: Some("store".into()),
         backends: vec!["store".into()],
+        rendered_input: Some(rendered_data),
+        ..Default::default()
     })
 }
 

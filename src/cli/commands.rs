@@ -2,8 +2,9 @@
 
 use super::output::{OutputEvent, OutputHandler};
 use super::signals::CancellationToken;
-use crate::config::{LlmuxConfig, WorkflowConfig, load_workflow};
+use crate::config::{LlmuxConfig, ProjectTrust, WorkflowConfig, load_workflow};
 use crate::role::detect_team;
+use crate::run_ledger::RunLedger;
 use crate::workflow::WorkflowRunner;
 use std::collections::HashMap;
 use std::path::Path;
@@ -140,6 +141,13 @@ pub async fn run_workflow(
 
     // Parse workflow args (simple key=value for now)
     let parsed_args = resolve_workflow_args(&workflow, &args)?;
+    let ledger_path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let mut ledger = RunLedger::open(&ledger_path)
+        .map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let run_id = ledger
+        .start_run(workflow_name, working_dir, &parsed_args, team_override)
+        .map_err(|error| format!("Failed to start run record: {error}"))?;
 
     if dry_run {
         handler.emit(OutputEvent::Info {
@@ -155,7 +163,7 @@ pub async fn run_workflow(
     // Create runner and execute
     let runner = WorkflowRunner::new(config.clone());
 
-    let result = runner
+    let result = match runner
         .run_with_cancellation(
             workflow.clone(),
             parsed_args,
@@ -165,7 +173,22 @@ pub async fn run_workflow(
             cancellation,
         )
         .await
-        .map_err(|e| format!("Workflow execution failed: {}", e))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("Workflow execution failed: {error}");
+            if let Err(ledger_error) = ledger.fail_run(run_id, &message) {
+                tracing::error!(error = %ledger_error, run_id, "Failed to finalize run ledger");
+            }
+            return Err(message);
+        }
+    };
+    ledger
+        .complete_run(run_id, &workflow, &result)
+        .map_err(|error| format!("Failed to finalize run record {run_id}: {error}"))?;
+    handler.emit(OutputEvent::Info {
+        message: format!("Run recorded as #{run_id}"),
+    });
 
     // Emit completion event
     handler.emit(OutputEvent::WorkflowComplete {
@@ -221,6 +244,164 @@ pub async fn run_workflow(
         eprintln!("\nWorkflow artifacts saved to: {}", output_dir);
     }
 
+    Ok(if result.success { 0 } else { 1 })
+}
+
+/// Display a durable workflow run record.
+pub fn show_run(run_id: i64, handler: &dyn OutputHandler) -> Result<i32, String> {
+    let path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let ledger =
+        RunLedger::open(&path).map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let run = ledger
+        .get_run(run_id)
+        .map_err(|error| format!("Failed to load run {run_id}: {error}"))?
+        .ok_or_else(|| format!("Run {run_id} not found"))?;
+
+    handler.emit(OutputEvent::Info {
+        message: format!(
+            "Run #{}: {} [{}]\nDirectory: {}\nStarted: {}\nFinished: {}\nDuration: {}\nArtifacts: {}",
+            run.id,
+            run.workflow_name,
+            run.status,
+            run.working_dir.display(),
+            run.started_at,
+            run.finished_at.as_deref().unwrap_or("-"),
+            run.duration_ms
+                .map(|duration| format!("{duration}ms"))
+                .unwrap_or_else(|| "-".into()),
+            run.output_dir.as_deref().unwrap_or("-"),
+        ),
+    });
+    for step in &run.steps {
+        handler.emit(OutputEvent::Info {
+            message: format!(
+                "\n[{}] {} [{}] {}ms\nInput:\n{}\nOutput:\n{}{}",
+                step.position + 1,
+                step.name,
+                step.status,
+                step.duration_ms,
+                step.rendered_input.as_deref().unwrap_or("-"),
+                step.output.as_deref().unwrap_or("-"),
+                step.error
+                    .as_deref()
+                    .map(|error| format!("\nError: {error}"))
+                    .unwrap_or_default(),
+            ),
+        });
+        for backend in &step.backend_runs {
+            handler.emit(OutputEvent::Info {
+                message: format!(
+                    "  backend={} model={} tokens={}/{}/{} cost={} duration={}ms{}",
+                    backend.backend,
+                    backend.model.as_deref().unwrap_or("-"),
+                    backend
+                        .prompt_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .completion_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .total_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .estimated_cost_usd
+                        .map(|value| format!("${value:.6}"))
+                        .unwrap_or_else(|| "unknown".into()),
+                    backend.duration_ms,
+                    backend
+                        .error
+                        .as_deref()
+                        .map(|error| format!(" error={error}"))
+                        .unwrap_or_default(),
+                ),
+            });
+        }
+    }
+    if let Some(error) = run.error.as_deref() {
+        handler.emit(OutputEvent::Info {
+            message: format!("\nRun error: {error}"),
+        });
+    }
+    Ok(0)
+}
+
+/// Resume a recorded workflow, retaining only successful prior steps.
+pub async fn resume_run(
+    previous_run_id: i64,
+    dry_run: bool,
+    trust: ProjectTrust,
+    handler: &dyn OutputHandler,
+    cancellation: CancellationToken,
+) -> Result<i32, String> {
+    let path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let mut ledger =
+        RunLedger::open(&path).map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let previous = ledger
+        .get_run(previous_run_id)
+        .map_err(|error| format!("Failed to load run {previous_run_id}: {error}"))?
+        .ok_or_else(|| format!("Run {previous_run_id} not found"))?;
+    let workflow = load_workflow(&previous.workflow_name, Some(&previous.working_dir))
+        .map_err(|error| format!("Failed to reload workflow: {error}"))?;
+    let config = Arc::new(
+        LlmuxConfig::load_with_trust(Some(&previous.working_dir), trust)
+            .map_err(|error| format!("Failed to reload configuration: {error}"))?,
+    );
+    let completed_steps = RunLedger::resumable_steps(&previous);
+    let run_id = ledger
+        .start_run(
+            &previous.workflow_name,
+            &previous.working_dir,
+            &previous.args,
+            previous.team.as_deref(),
+        )
+        .map_err(|error| format!("Failed to start resumed run: {error}"))?;
+
+    handler.emit(OutputEvent::Info {
+        message: format!(
+            "Resuming run #{previous_run_id} as #{run_id}; reusing {} successful step(s)",
+            completed_steps.len()
+        ),
+    });
+    handler.emit(OutputEvent::WorkflowStart {
+        name: workflow.name.clone(),
+        steps: workflow.steps.len(),
+    });
+    let runner = WorkflowRunner::new(config);
+    let result = match runner
+        .run_resuming_with_cancellation(
+            workflow.clone(),
+            previous.args,
+            &previous.working_dir,
+            previous.team.as_deref(),
+            dry_run,
+            cancellation,
+            completed_steps,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("Workflow resume failed: {error}");
+            let _ = ledger.fail_run(run_id, &message);
+            return Err(message);
+        }
+    };
+    ledger
+        .complete_run(run_id, &workflow, &result)
+        .map_err(|error| format!("Failed to finalize resumed run: {error}"))?;
+    handler.emit(OutputEvent::WorkflowComplete {
+        success: result.success,
+        duration_ms: result.duration.as_millis() as u64,
+        steps_completed: result.steps.len(),
+    });
+    handler.emit(OutputEvent::Info {
+        message: format!("Run recorded as #{run_id}"),
+    });
     Ok(if result.success { 0 } else { 1 })
 }
 

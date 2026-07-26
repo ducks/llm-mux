@@ -2,7 +2,7 @@
 
 //! CLI-based backend executor
 
-use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
+use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};
 use crate::config::BackendConfig;
 use crate::process::{
     MAX_CAPTURE_BYTES, configure_child_process, exit_status_code, terminate_child_process,
@@ -141,6 +141,36 @@ fn extract_response_text(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn extract_token_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = match value {
+        serde_json::Value::Array(events) => events
+            .iter()
+            .rev()
+            .find_map(|event| event.get("usage").or_else(|| event.pointer("/turn/usage")))?,
+        value => value.get("usage")?,
+    };
+    let read = |names: &[&str]| {
+        names.iter().find_map(|name| {
+            usage
+                .get(*name)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+        })
+    };
+    let prompt_tokens = read(&["input_tokens", "prompt_tokens"]);
+    let completion_tokens = read(&["output_tokens", "completion_tokens"]);
+    let total_tokens = read(&["total_tokens"]).or_else(|| {
+        prompt_tokens
+            .zip(completion_tokens)
+            .map(|(input, output)| input + output)
+    });
+    Some(TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
+}
+
 #[async_trait]
 impl BackendExecutor for CliBackend {
     async fn execute(&self, request: &BackendRequest) -> Result<BackendResponse, BackendError> {
@@ -251,8 +281,14 @@ impl BackendExecutor for CliBackend {
                 if status.success() {
                     let response = if self.json_output {
                         if let Some((text, structured)) = self.parse_json_output(&stdout_text) {
-                            BackendResponse::new(text, self.name.clone(), elapsed)
-                                .with_structured(structured)
+                            let usage = extract_token_usage(&structured);
+                            let mut response =
+                                BackendResponse::new(text, self.name.clone(), elapsed)
+                                    .with_structured(structured);
+                            if let Some(usage) = usage {
+                                response = response.with_usage(usage);
+                            }
+                            response
                         } else {
                             BackendResponse::new(stdout_text.clone(), self.name.clone(), elapsed)
                         }
@@ -397,6 +433,21 @@ mod tests {
         let (text, structured) = backend.parse_json_output(output).unwrap();
         assert_eq!(text, "final answer");
         assert_eq!(structured.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_codex_jsonl_extracts_token_usage() {
+        let structured = serde_json::json!([
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {"type": "turn.completed", "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4
+            }}
+        ]);
+        let usage = extract_token_usage(&structured).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(4));
+        assert_eq!(usage.total_tokens, Some(14));
     }
 
     #[tokio::test]

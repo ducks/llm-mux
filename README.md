@@ -55,6 +55,7 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Chain steps together** - shell commands, LLM queries, file edits, and verification steps compose naturally
 - **Apply and verify** - LLM suggests edits, llm-mux applies them, runs your test suite, rolls back on failure
 - **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
+- **Inspect and resume runs** - prompts, outputs, provider usage, and failures are kept in a durable SQLite ledger
 - **Works anywhere** - single binary with direct HTTP support; CLI backends use their corresponding installed tools
 
 ## Install
@@ -217,7 +218,27 @@ api_key = "${ENV_VAR}"    # API key; ${VAR} expands from environment
 enabled = true
 timeout = 300             # seconds
 max_retries = 3
+input_cost_per_million = 2.50   # optional; enables cost estimates
+output_cost_per_million = 10.00 # optional; enables cost estimates
 ```
+
+Token usage is recorded when a provider reports it. Cost is shown as unknown
+unless pricing is configured explicitly; llm-mux does not assume model prices.
+
+## Run history and resume
+
+Every workflow execution is assigned a run ID and stored in
+`~/.config/llm-mux/runs.db`. The ledger includes resolved prompts or commands,
+outputs, errors, duration, backend/model, token usage, and estimated cost.
+
+```bash
+llm-mux runs show 42
+llm-mux runs resume 42
+```
+
+Resume reloads the workflow from its original project directory, restores only
+successful prior step results, and executes the unfinished dependency tail as a
+new run. Existing run records are immutable.
 
 ### Role execution modes
 
@@ -260,6 +281,8 @@ depends_on = ["database"]
 ```
 llm-mux run <workflow> [args...]   Run a workflow
 llm-mux run <workflow> --dry-run   Preview without executing
+llm-mux runs show <id>              Inspect a recorded run
+llm-mux runs resume <id>            Resume unfinished steps as a new run
 llm-mux validate <workflow>        Validate workflow syntax
 llm-mux doctor                     Check backend availability
 llm-mux backends                   List configured backends

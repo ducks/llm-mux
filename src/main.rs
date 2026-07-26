@@ -7,6 +7,7 @@ mod logging;
 mod memory;
 mod process;
 mod role;
+mod run_ledger;
 mod template;
 mod workflow;
 
@@ -78,6 +79,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Inspect or resume recorded workflow runs
+    Runs {
+        #[command(subcommand)]
+        command: RunCommands,
+    },
+
     /// Validate a workflow without running
     Validate {
         /// Workflow name
@@ -122,6 +129,25 @@ enum Commands {
         /// Force overwrite existing config
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCommands {
+    /// Show a run, its steps, provider usage, and costs
+    Show {
+        /// Numeric run ID
+        id: i64,
+    },
+
+    /// Continue a run from its last successful steps
+    Resume {
+        /// Numeric run ID
+        id: i64,
+
+        /// Preview remaining shell and apply steps without executing them
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -173,11 +199,6 @@ async fn main() -> Result<()> {
     } else {
         config::ProjectTrust::Untrusted
     };
-    let config = Arc::new(config::LlmuxConfig::load_with_trust(
-        Some(&working_dir),
-        trust,
-    )?);
-
     // Setup cancellation token for signal handling
     let cancel_token = signals::CancellationToken::new();
 
@@ -194,6 +215,10 @@ async fn main() -> Result<()> {
             args,
             dry_run,
         } => {
+            let config = Arc::new(config::LlmuxConfig::load_with_trust(
+                Some(&working_dir),
+                trust,
+            )?);
             match commands::run_workflow(
                 &workflow,
                 args,
@@ -215,6 +240,27 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Runs { command } => match command {
+            RunCommands::Show { id } => match commands::show_run(id, &*handler) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    1
+                }
+            },
+            RunCommands::Resume { id, dry_run } => {
+                match commands::resume_run(id, dry_run, trust, &*handler, cancel_token.clone())
+                    .await
+                {
+                    Ok(code) => code,
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        1
+                    }
+                }
+            }
+        },
+
         Commands::Validate { workflow } => {
             match commands::validate_workflow(&workflow, Some(&working_dir), &*handler) {
                 Ok(code) => code,
@@ -225,24 +271,31 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Doctor => commands::doctor(&config, &working_dir, &*handler).await,
+        Commands::Doctor => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
+            commands::doctor(&config, &working_dir, &*handler).await
+        }
 
         Commands::Backends => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_backends(&config, &*handler);
             0
         }
 
         Commands::Teams => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_teams(&config, &*handler);
             0
         }
 
         Commands::Roles => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_roles(&config, &*handler);
             0
         }
 
         Commands::Ecosystems => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_ecosystems(&config, &*handler);
             0
         }
@@ -280,4 +333,31 @@ async fn main() -> Result<()> {
     };
 
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_run_ledger_commands() {
+        let show = Cli::try_parse_from(["llmux", "runs", "show", "42"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Commands::Runs {
+                command: RunCommands::Show { id: 42 }
+            }
+        ));
+
+        let resume = Cli::try_parse_from(["llmux", "runs", "resume", "42", "--dry-run"]).unwrap();
+        assert!(matches!(
+            resume.command,
+            Commands::Runs {
+                command: RunCommands::Resume {
+                    id: 42,
+                    dry_run: true
+                }
+            }
+        ));
+    }
 }
