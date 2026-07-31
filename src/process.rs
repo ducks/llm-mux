@@ -324,7 +324,10 @@ mod tests {
     async fn test_wait_for_child_output_replaces_invalid_utf8() {
         let mut child = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("printf '\\xff'")
+            // POSIX printf only specifies octal byte escapes. Bash accepts
+            // \xff, but dash prints it literally, which made this test fail
+            // on GitHub's Ubuntu runners.
+            .arg("printf '\\377'")
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("failed to spawn");
