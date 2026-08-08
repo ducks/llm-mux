@@ -11,8 +11,10 @@ mod workflow;
 pub use backend::BackendConfig;
 #[allow(unused_imports)]
 pub use ecosystem::{EcosystemConfig, ProjectConfig};
-pub use loader::{LlmuxConfig, StepResult, load_workflow};
+pub use loader::{
+    BackendRun, LlmuxConfig, ProjectTrust, StepResult, available_workflows, load_workflow,
+};
 #[allow(unused_imports)]
 pub use role::{RoleConfig, RoleExecution, RoleOverride, TeamConfig};
 #[allow(unused_imports)]
-pub use workflow::{OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};
+pub use workflow::{ArgDef, OutputSchema, PropertySchema, StepConfig, StepType, WorkflowConfig};

@@ -1,7 +1,8 @@
 //! Claude API backend executor
 
-use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
+use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};
 use crate::config::BackendConfig;
+use crate::process::MAX_CAPTURE_BYTES;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::env;
@@ -26,11 +27,18 @@ pub struct ClaudeBackend {
 #[derive(Debug, Deserialize)]
 struct ClaudeResponse {
     content: Vec<ContentBlock>,
+    usage: Option<ClaudeUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ContentBlock {
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsage {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
 }
 
 impl ClaudeBackend {
@@ -91,34 +99,68 @@ impl BackendExecutor for ClaudeBackend {
             request.prompt.len()
         );
 
-        let response = self
+        let send = self
             .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
-            .send()
-            .await
-            .map_err(|e| BackendError::Unavailable {
-                message: format!("Failed to send request: {}", e),
-            })?;
+            .send();
+
+        let response = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                response = send => response,
+                _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+            }
+        } else {
+            send.await
+        }
+        .map_err(|e| BackendError::Unavailable {
+            message: format!("Failed to send request: {}", e),
+        })?;
 
         let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::execution_failed(
-                Some(status.as_u16() as i32),
-                String::new(),
-                format!("API error {}: {}", status, body),
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_CAPTURE_BYTES as u64)
+        {
+            return Err(BackendError::parse(
+                "Claude response exceeded 16 MiB capture limit",
             ));
         }
 
-        let claude_response: ClaudeResponse = response
-            .json()
-            .await
+        let body = response.bytes();
+        let body = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                body = body => body,
+                _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+            }
+        } else {
+            body.await
+        }
+        .map_err(|error| BackendError::Unavailable {
+            message: format!("Failed to read response: {error}"),
+        })?;
+
+        if body.len() > MAX_CAPTURE_BYTES {
+            return Err(BackendError::parse(
+                "Claude response exceeded 16 MiB capture limit",
+            ));
+        }
+
+        if !status.is_success() {
+            return Err(BackendError::execution_failed(
+                Some(status.as_u16() as i32),
+                String::new(),
+                format!("API error {}: {}", status, String::from_utf8_lossy(&body)),
+            ));
+        }
+
+        let claude_response: ClaudeResponse = serde_json::from_slice(&body)
             .map_err(|e| BackendError::parse(format!("Failed to parse response: {}", e)))?;
 
+        let usage = claude_response.usage;
         let text = claude_response
             .content
             .into_iter()
@@ -128,11 +170,19 @@ impl BackendExecutor for ClaudeBackend {
 
         eprintln!("[DEBUG {}] got {} chars response", self.name, text.len());
 
-        Ok(BackendResponse::new(
-            text,
-            self.name.clone(),
-            start.elapsed(),
-        ))
+        let mut response =
+            BackendResponse::new(text, self.name.clone(), start.elapsed()).with_model(&self.model);
+        if let Some(usage) = usage {
+            response = response.with_usage(TokenUsage {
+                prompt_tokens: usage.input_tokens,
+                completion_tokens: usage.output_tokens,
+                total_tokens: usage
+                    .input_tokens
+                    .zip(usage.output_tokens)
+                    .map(|(input, output)| input + output),
+            });
+        }
+        Ok(response)
     }
 
     fn name(&self) -> &str {

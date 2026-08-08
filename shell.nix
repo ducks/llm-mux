@@ -2,11 +2,7 @@
 
 pkgs.mkShell {
   buildInputs = with pkgs; [
-    rustc
-    cargo
-    rust-analyzer
-    clippy
-    rustfmt
+    rustup
     pkg-config
     openssl
     sqlite

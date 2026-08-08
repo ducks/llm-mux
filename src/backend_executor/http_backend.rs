@@ -4,6 +4,7 @@
 
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};
 use crate::config::BackendConfig;
+use crate::process::MAX_CAPTURE_BYTES;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -158,12 +159,45 @@ impl HttpBackend {
     /// Try to parse retry-after from error response
     fn parse_retry_after(&self, body: &str) -> Option<Duration> {
         // Try to parse as JSON and look for retry_after field
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Some(seconds) = json.get("retry_after").and_then(|v| v.as_f64()) {
-                return Some(Duration::from_secs_f64(seconds));
-            }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body)
+            && let Some(seconds) = json.get("retry_after").and_then(|v| v.as_f64())
+        {
+            return Some(Duration::from_secs_f64(seconds));
         }
         None
+    }
+
+    async fn read_response_body(
+        response: reqwest::Response,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<u8>, BackendError> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_CAPTURE_BYTES as u64)
+        {
+            return Err(BackendError::parse(
+                "HTTP response exceeded 16 MiB capture limit",
+            ));
+        }
+
+        let body = response.bytes();
+        let bytes = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                result = body => result,
+                _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+            }
+        } else {
+            body.await
+        }
+        .map_err(|error| BackendError::network(format!("failed to read response: {error}")))?;
+
+        if bytes.len() > MAX_CAPTURE_BYTES {
+            return Err(BackendError::parse(
+                "HTTP response exceeded 16 MiB capture limit",
+            ));
+        }
+
+        Ok(bytes.to_vec())
     }
 }
 
@@ -205,17 +239,27 @@ impl BackendExecutor for HttpBackend {
 
         // Send request with timeout
         let timeout = request.timeout.unwrap_or(self.timeout);
-        let result = tokio::time::timeout(timeout, http_request.send()).await;
+        let send = tokio::time::timeout(timeout, http_request.send());
+        let result = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                result = send => Some(result),
+                _ = cancellation.cancelled() => None,
+            }
+        } else {
+            Some(send.await)
+        };
 
         let elapsed = start.elapsed();
 
         match result {
-            Ok(Ok(response)) => {
+            Some(Ok(Ok(response))) => {
                 let status = response.status();
 
                 if status.is_success() {
-                    let completion: ChatCompletionResponse =
-                        response.json().await.map_err(|e| {
+                    let body =
+                        Self::read_response_body(response, request.cancellation.as_ref()).await?;
+                    let completion: ChatCompletionResponse = serde_json::from_slice(&body)
+                        .map_err(|e| {
                             BackendError::parse(format!("failed to parse response: {}", e))
                         })?;
 
@@ -242,11 +286,12 @@ impl BackendExecutor for HttpBackend {
 
                     Ok(backend_response)
                 } else {
-                    let body = response.text().await.unwrap_or_default();
-                    Err(self.map_http_error(status, &body))
+                    let body =
+                        Self::read_response_body(response, request.cancellation.as_ref()).await?;
+                    Err(self.map_http_error(status, &String::from_utf8_lossy(&body)))
                 }
             }
-            Ok(Err(e)) => {
+            Some(Ok(Err(e))) => {
                 // Request error (network, etc.)
                 if e.is_timeout() {
                     Err(BackendError::timeout(elapsed, None))
@@ -256,10 +301,11 @@ impl BackendExecutor for HttpBackend {
                     Err(BackendError::network(format!("request failed: {}", e)))
                 }
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 // Tokio timeout
                 Err(BackendError::timeout(elapsed, None))
             }
+            None => Err(BackendError::Cancelled),
         }
     }
 

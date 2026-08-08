@@ -21,11 +21,24 @@ prompt = "Review these changes:\n\n{{ steps.diff.output }}"
 depends_on = ["diff"]
 
 [[steps]]
+name = "synthesize"
+type = "query"
+role = "coder"
+prompt = """
+Turn these reviews into one minimal patch.
+Return only a unified diff or a JSON edits array:
+
+{{ steps.analyze.output }}
+"""
+depends_on = ["analyze"]
+
+[[steps]]
 name = "fix"
 type = "apply"
-source = "analyze"
+source = "synthesize"
 verify = "cargo test"   # rolls back if tests fail
-depends_on = ["analyze"]
+rollback_on_failure = true
+depends_on = ["synthesize"]
 ```
 
 ```bash
@@ -33,6 +46,28 @@ llm-mux run review
 ```
 
 No SDK. No Python. No boilerplate. A single Rust binary, a config file, done.
+
+## Built-in repository review
+
+`repository-review` gathers a bounded Git diff, asks every backend in the
+`default` role for an independent review, reconciles the findings with one
+backend, and produces a structured patch.
+
+```bash
+llm-mux run repository-review
+llm-mux run repository-review base=origin/main scope=src
+```
+
+Review and patch generation do not modify the repository. Applying is explicit:
+
+```bash
+llm-mux run repository-review base=origin/main apply=true
+```
+
+Applied edits are transactional and must pass `git diff --check`; otherwise
+they are rolled back. Use `llm-mux runs show <id>` to inspect every model’s
+prompt, output, usage, and cost, or `llm-mux runs resume <id>` after fixing a
+provider or configuration failure.
 
 ## Why llm-mux
 
@@ -42,7 +77,8 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Chain steps together** - shell commands, LLM queries, file edits, and verification steps compose naturally
 - **Apply and verify** - LLM suggests edits, llm-mux applies them, runs your test suite, rolls back on failure
 - **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
-- **Works anywhere** - single binary, no runtime dependencies, runs in CI
+- **Inspect and resume runs** - prompts, outputs, provider usage, and failures are kept in a durable SQLite ledger
+- **Works anywhere** - single binary with direct HTTP support; CLI backends use their corresponding installed tools
 
 llm-mux grew out of [lok](https://github.com/ducks/lok), an earlier take on the
 same idea. Lok is no longer developed; this is where the work continues.
@@ -86,6 +122,11 @@ api_key = "${OPENAI_API_KEY}"
 Roles map task types to one or more backends:
 
 ```toml
+[roles.default]
+description = "General queries and built-in workflows"
+backends = ["claude", "gemini"]
+execution = "first"
+
 [roles.analyzer]
 description = "Code analysis"
 backends = ["claude", "gemini"]
@@ -95,7 +136,16 @@ execution = "parallel"    # first | parallel | fallback
 description = "Fast local queries"
 backends = ["ollama"]
 execution = "first"
+
+[roles.coder]
+description = "Turn findings into one structured patch"
+backends = ["claude"]
+execution = "first"
 ```
+
+`llm-mux init --global` puts every detected backend in the `default` role.
+Ordinary queries use its first backend; workflow steps can opt into parallel
+execution.
 
 ### 3. Create a workflow
 
@@ -159,7 +209,6 @@ name = "fix"
 type = "apply"
 source = "analyze"
 verify = "cargo test"
-verify_retries = 2
 rollback_on_failure = true
 depends_on = ["analyze"]
 ```
@@ -188,7 +237,8 @@ Inside prompts and shell commands:
 {{ ecosystem.current_project }}   current project info
 ```
 
-Filters: `shell_escape`, `json`, `join`, `lines`, `trim`, `default`.
+Filters: `shell_escape`, `json`, `join`, `lines`, `trim`, `truncate_chars`,
+`default`.
 
 ## Configuration Reference
 
@@ -203,7 +253,27 @@ api_key = "${ENV_VAR}"    # API key; ${VAR} expands from environment
 enabled = true
 timeout = 300             # seconds
 max_retries = 3
+input_cost_per_million = 2.50   # optional; enables cost estimates
+output_cost_per_million = 10.00 # optional; enables cost estimates
 ```
+
+Token usage is recorded when a provider reports it. Cost is shown as unknown
+unless pricing is configured explicitly; llm-mux does not assume model prices.
+
+## Run history and resume
+
+Every workflow execution is assigned a run ID and stored in
+`~/.config/llm-mux/runs.db`. The ledger includes resolved prompts or commands,
+outputs, errors, duration, backend/model, token usage, and estimated cost.
+
+```bash
+llm-mux runs show 42
+llm-mux runs resume 42
+```
+
+Resume reloads the workflow from its original project directory, restores only
+successful prior step results, and executes the unfinished dependency tail as a
+new run. Existing run records are immutable.
 
 ### Role execution modes
 
@@ -246,6 +316,8 @@ depends_on = ["database"]
 ```
 llm-mux run <workflow> [args...]   Run a workflow
 llm-mux run <workflow> --dry-run   Preview without executing
+llm-mux runs show <id>              Inspect a recorded run
+llm-mux runs resume <id>            Resume unfinished steps as a new run
 llm-mux validate <workflow>        Validate workflow syntax
 llm-mux doctor                     Check backend availability
 llm-mux backends                   List configured backends
@@ -299,12 +371,8 @@ role = "coder"
 prompt = """
 Fix this bug: {{ steps.identify.output }}
 
-Return the edit as:
-<<<
-old code
-===
-new code
->>>
+Return only JSON in this format:
+{"edits":[{"path":"src/file.rs","old":"exact old text","new":"replacement text"}]}
 """
 depends_on = ["identify"]
 
@@ -330,7 +398,7 @@ name = "review-each"
 type = "query"
 role = "analyzer"
 for_each = "steps.list.output | lines"
-prompt = "Review {{ item }}:\n\n{{ steps.read.output }}"
+prompt = "Review the changed file {{ item }}. Inspect it in the working tree."
 depends_on = ["list"]
 ```
 

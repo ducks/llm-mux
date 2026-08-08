@@ -230,8 +230,6 @@ name = "risky"
 type = "query"
 role = "analyzer"
 continue_on_error = true   # Soft fail - workflow continues
-retries = 3                # Retry on failure
-retry_delay = 2000         # Exponential backoff starting point
 timeout = 60000            # Step timeout
 
 [[steps]]
@@ -808,49 +806,17 @@ base_delay_ms = 1000         # Exponential backoff
 
 This happens inside the backend wrapper, invisible to workflows.
 
-**Layer 2: Step-level (configured)**
+**Layer 2: Step-level**
 
-Steps can retry on specific conditions:
+Step-level retries are intentionally rejected for now. Query retries belong to
+backend policy; retrying shell or apply steps without idempotency guarantees can
+repeat side effects.
 
-```toml
-[[steps]]
-name = "analyze"
-type = "query"
-role = "analyzer"
+**Layer 3: Verification correction**
 
-# Retry config
-retries = 2
-retry_on = ["timeout", "rate_limit", "parse_error"]
-retry_delay_ms = 2000
-
-# Don't retry these
-fail_on = ["auth_error", "config_error"]
-```
-
-**Layer 3: Verification retry (special case)**
-
-When `type = "apply"` and verification fails:
-
-```toml
-[[steps]]
-name = "fix"
-type = "apply"
-source = "steps.consensus"
-verify = "cargo clippy"
-
-# Verification retry - re-query LLM with error
-verify_retries = 2
-verify_retry_prompt = """
-The fix failed verification:
-
-{{ error.stderr }}
-
-Original fix:
-{{ source.edits }}
-
-Provide corrected edits.
-"""
-```
+`verify_retries` is rejected because an apply step cannot itself re-query an
+LLM. Model-assisted correction should be represented explicitly as another
+query/apply pair so its role, prompt, cost, and side effects are visible.
 
 ### Error Output
 

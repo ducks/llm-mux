@@ -1,0 +1,102 @@
+name = "repository-review"
+description = "Multi-model repository review, reconciliation, and opt-in verified patch application"
+version = 1
+timeout = 1800000
+
+[args.base]
+default = "HEAD"
+description = "Git revision to compare against"
+
+[args.scope]
+default = "."
+description = "Path within the repository to review"
+
+[args.apply]
+default = "false"
+description = "Set to true to apply the generated patch and run git diff --check"
+
+[[steps]]
+name = "repository_context"
+type = "shell"
+run = """
+git status --short
+git diff --stat {{ args.base }} -- {{ args.scope }}
+git diff --no-ext-diff {{ args.base }} -- {{ args.scope }}
+"""
+
+[[steps]]
+name = "independent_reviews"
+type = "query"
+role = "default"
+parallel = true
+min_success = 1
+depends_on = ["repository_context"]
+prompt = """
+Act as a senior software engineer reviewing an AI-enabled developer tool.
+Independently inspect the repository change below. Focus on correctness,
+security boundaries, destructive behavior, process lifecycle, cancellation,
+provider/API assumptions, prompt and output handling, observability, and tests.
+
+Report only actionable findings. For each finding include:
+- priority: critical, high, medium, or low
+- precise file/location when the diff provides one
+- failure scenario and user impact
+- smallest credible fix
+
+Do not invent issues merely to fill a list. Say "no actionable findings" if
+the change is sound.
+
+{{ steps.repository_context.output | truncate_chars(204800) }}
+"""
+
+[[steps]]
+name = "reconcile"
+type = "query"
+role = "default"
+depends_on = ["independent_reviews"]
+prompt = """
+Reconcile these independent code reviews into one engineering decision.
+Deduplicate overlapping findings, discard claims unsupported by the supplied
+evidence, resolve disagreements explicitly, and rank the remaining work by
+risk. Preserve precise locations and concrete failure scenarios.
+
+Reviews:
+{{ steps.independent_reviews.output | truncate_chars(307200) }}
+"""
+
+[[steps]]
+name = "propose_patch"
+type = "query"
+role = "default"
+depends_on = ["repository_context", "reconcile"]
+prompt = """
+Produce the smallest safe patch that addresses the critical and high-priority
+findings in the reconciled review. Do not make unrelated style changes.
+
+Return only a JSON array of edits in this exact form:
+[
+  {
+    "file": "relative/path",
+    "old": "exact text to replace",
+    "new": "replacement text"
+  }
+]
+
+Use repository-relative paths. The `old` text must match exactly. If no patch
+is justified, return [].
+
+Repository context:
+{{ steps.repository_context.output | truncate_chars(204800) }}
+
+Reconciled review:
+{{ steps.reconcile.output | truncate_chars(204800) }}
+"""
+
+[[steps]]
+name = "apply_patch"
+type = "apply"
+source = "propose_patch"
+verify = "git diff --check"
+rollback_on_failure = true
+depends_on = ["propose_patch"]
+if = "args.apply == 'true'"

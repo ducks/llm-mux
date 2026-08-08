@@ -78,8 +78,12 @@ impl TemplateEngine {
             // Register the escape function for the "shell" auto-escape mode
             env.set_formatter(|out, state, value| {
                 if state.auto_escape() == minijinja::AutoEscape::Custom("shell") {
-                    let escaped = filters::shell_escape_str(&value.to_string());
-                    out.write_str(&escaped)?;
+                    if value.is_safe() {
+                        out.write_str(&value.to_string())?;
+                    } else {
+                        let escaped = filters::shell_escape_str(&value.to_string());
+                        out.write_str(&escaped)?;
+                    }
                 } else {
                     write!(out, "{value}")?;
                 }
@@ -145,10 +149,10 @@ fn convert_minijinja_error(err: minijinja::Error, ctx: &TemplateContext) -> Temp
 /// Extract variable name from minijinja error message
 fn extract_var_from_error(msg: &str) -> String {
     // Messages look like: "undefined value (in <string>:1): variable is `steps.foo`"
-    if let Some(start) = msg.find('`') {
-        if let Some(end) = msg[start + 1..].find('`') {
-            return msg[start + 1..start + 1 + end].to_string();
-        }
+    if let Some(start) = msg.find('`')
+        && let Some(end) = msg[start + 1..].find('`')
+    {
+        return msg[start + 1..start + 1 + end].to_string();
     }
     "unknown".to_string()
 }
@@ -309,6 +313,18 @@ mod tests {
 
         let result = engine.render_shell("echo {{ args.input }}", &ctx).unwrap();
         assert_eq!(result, "echo '$(rm -rf /)'");
+    }
+
+    #[test]
+    fn test_render_shell_explicit_escape_is_not_double_escaped() {
+        let engine = TemplateEngine::new();
+        let mut ctx = TemplateContext::new();
+        ctx.args.insert("input".into(), "hello world".into());
+
+        let result = engine
+            .render_shell("echo {{ args.input | shell_escape }}", &ctx)
+            .unwrap();
+        assert_eq!(result, "echo 'hello world'");
     }
 
     #[test]

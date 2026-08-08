@@ -27,23 +27,31 @@ pub enum RollbackError {
 /// Rollback strategy configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RollbackStrategy {
-    /// Use git checkout to restore files
+    /// Restore each touched file from the backup taken before the run.
+    /// This is the default: it returns files to their exact pre-run state,
+    /// preserving any uncommitted work and untracked files.
     #[default]
-    Git,
-    /// Restore from .llmux/backups/
     Backup,
+    /// Restore files with `git checkout -- <file>`.
+    ///
+    /// WARNING: this restores to HEAD, not to the pre-run working-tree state,
+    /// so it discards uncommitted edits the user had in the touched files
+    /// before the run. Prefer `Backup`. Opt in only when you specifically want
+    /// a checkout-to-HEAD and know the tree was clean.
+    Git,
     /// Don't rollback (for debugging)
     None,
 }
 
 impl RollbackStrategy {
-    /// Parse from string
+    /// Parse from string. Unrecognized values fall back to the safe default
+    /// (`Backup`) rather than the lossy `Git` checkout.
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "git" => Self::Git,
             "backup" => Self::Backup,
             "none" => Self::None,
-            _ => Self::Git,
+            _ => Self::default(),
         }
     }
 }
@@ -131,7 +139,7 @@ async fn rollback_git(
         }
     }
 
-    if !result.failed.is_empty() && !result.restored.is_empty() {
+    if !result.failed.is_empty() {
         return Err(RollbackError::PartialRollback {
             succeeded: result.restored.len(),
             failed: result.failed.len(),
@@ -185,7 +193,9 @@ async fn rollback_backup(
         }
     }
 
-    if !result.failed.is_empty() && !result.restored.is_empty() {
+    // Any failure is worth surfacing - a rollback that couldn't restore some
+    // (or all) files left the tree in a mixed state the caller must know about.
+    if !result.failed.is_empty() {
         return Err(RollbackError::PartialRollback {
             succeeded: result.restored.len(),
             failed: result.failed.len(),
@@ -221,7 +231,11 @@ mod tests {
             RollbackStrategy::Backup
         );
         assert_eq!(RollbackStrategy::from_str("none"), RollbackStrategy::None);
-        assert_eq!(RollbackStrategy::from_str("unknown"), RollbackStrategy::Git);
+        // Unknown falls back to the safe default, not the lossy Git checkout.
+        assert_eq!(
+            RollbackStrategy::from_str("unknown"),
+            RollbackStrategy::Backup
+        );
     }
 
     #[tokio::test]
@@ -276,7 +290,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let created_path = setup_test_file(dir.path(), "new.rs", "new content");
 
-        let result = rollback_backup(&[], &[created_path.clone()]).await.unwrap();
+        let result = rollback_backup(&[], std::slice::from_ref(&created_path))
+            .await
+            .unwrap();
 
         assert_eq!(result.restored.len(), 1);
         assert!(!created_path.exists());

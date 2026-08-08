@@ -56,29 +56,28 @@ impl<'a> RoleResolver<'a> {
     /// 2. Global role definition (roles.X)
     pub fn resolve(&self, role: &str, team: Option<&str>) -> Result<ResolvedRole, RoleError> {
         // First try team-specific override
-        if let Some(team_name) = team {
-            if let Some(team_config) = self.config.teams.get(team_name) {
-                if let Some(override_) = team_config.roles.get(role) {
-                    // Validate backends exist
-                    self.validate_backends(&override_.backends)?;
+        if let Some(team_name) = team
+            && let Some(team_config) = self.config.teams.get(team_name)
+            && let Some(override_) = team_config.roles.get(role)
+        {
+            // Validate backends exist
+            self.validate_backends(&override_.backends)?;
 
-                    // Get execution mode from override or fall back to global role
-                    let (execution, min_success) = if let Some(exec) = override_.execution {
-                        (exec, 1) // Override specifies execution mode
-                    } else if let Some(global_role) = self.config.roles.get(role) {
-                        (global_role.execution, global_role.min_success)
-                    } else {
-                        (RoleExecution::First, 1)
-                    };
+            // Get execution mode from override or fall back to global role
+            let (execution, min_success) = if let Some(exec) = override_.execution {
+                (exec, 1) // Override specifies execution mode
+            } else if let Some(global_role) = self.config.roles.get(role) {
+                (global_role.execution, global_role.min_success)
+            } else {
+                (RoleExecution::First, 1)
+            };
 
-                    return Ok(ResolvedRole {
-                        name: role.to_string(),
-                        backends: override_.backends.clone(),
-                        execution,
-                        min_success,
-                    });
-                }
-            }
+            return Ok(ResolvedRole {
+                name: role.to_string(),
+                backends: override_.backends.clone(),
+                execution,
+                min_success,
+            });
         }
 
         // Fall back to global role definition

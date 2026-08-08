@@ -2,8 +2,8 @@
 
 use super::diff_applier::{ApplyError, ApplyResult, DiffApplier, ModifiedFile};
 use super::edit_parser::{EditParseError, parse_edits};
-use super::rollback::{RollbackStrategy, cleanup_backups, rollback};
-use super::verification::{VerifyError, VerifyResult, run_verify};
+use super::rollback::{RollbackError, RollbackStrategy, cleanup_backups, rollback};
+use super::verification::{VerifyError, VerifyResult, run_verify_cancellable};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -20,6 +20,9 @@ pub enum ApplyVerifyError {
     #[error("verification failed: {0}")]
     VerifyError(#[from] VerifyError),
 
+    #[error("rollback failed: {0}")]
+    RollbackError(#[from] RollbackError),
+
     #[error("verification failed after {attempts} attempts")]
     MaxRetriesExceeded { attempts: u32 },
 
@@ -28,6 +31,11 @@ pub enum ApplyVerifyError {
 
     #[error("source step output not found: {step}")]
     SourceNotFound { step: String },
+
+    #[error(
+        "verification retries require another LLM query and are not supported by apply_and_verify"
+    )]
+    UnsupportedRetries,
 }
 
 /// Configuration for apply-verify cycle
@@ -47,6 +55,8 @@ pub struct ApplyVerifyConfig {
     pub verify_timeout: Option<Duration>,
     /// Prompt template for retry queries
     pub retry_prompt: Option<String>,
+    /// Cancellation shared with the owning workflow.
+    pub cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Default for ApplyVerifyConfig {
@@ -59,6 +69,7 @@ impl Default for ApplyVerifyConfig {
             timeout: None,
             verify_timeout: Some(Duration::from_secs(300)), // 5 minute default
             retry_prompt: None,
+            cancellation: None,
         }
     }
 }
@@ -108,6 +119,10 @@ pub async fn apply_and_verify(
     config: &ApplyVerifyConfig,
     working_dir: &Path,
 ) -> Result<ApplyVerifyResult, ApplyVerifyError> {
+    if config.verify_retries > 0 {
+        return Err(ApplyVerifyError::UnsupportedRetries);
+    }
+
     let start = Instant::now();
     let mut attempts = Vec::new();
     let mut current_output = source_output.to_string();
@@ -125,7 +140,26 @@ pub async fn apply_and_verify(
 
         // Run verification if configured
         let verify_result = if let Some(ref verify_cmd) = config.verify_command {
-            Some(run_verify(verify_cmd, working_dir, config.verify_timeout).await?)
+            match run_verify_cancellable(
+                verify_cmd,
+                working_dir,
+                config.verify_timeout,
+                config.cancellation.as_ref(),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    rollback(
+                        &apply_result.modified_files,
+                        &apply_result.created_files,
+                        config.rollback_strategy,
+                        working_dir,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+            }
         } else {
             None
         };
@@ -158,13 +192,13 @@ pub async fn apply_and_verify(
         }
 
         // Verification failed - rollback and maybe retry
-        let _ = rollback(
+        rollback(
             &apply_result.modified_files,
             &apply_result.created_files,
             config.rollback_strategy,
             working_dir,
         )
-        .await;
+        .await?;
 
         if attempt_num < max_attempts {
             // Prepare retry prompt with error context
@@ -216,7 +250,9 @@ pub async fn apply_only(
 ) -> Result<ApplyResult, ApplyVerifyError> {
     let edits = parse_edits(source_output)?;
     let applier = DiffApplier::new(working_dir);
-    Ok(applier.apply(&edits)?)
+    let result = applier.apply(&edits)?;
+    cleanup_backups(&result.modified_files);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -297,6 +333,113 @@ mod tests {
         assert!(content.contains("fn old()"));
     }
 
+    /// Initialize a git repo in `dir`, commit `path` with `committed`, then
+    /// overwrite it with `uncommitted` (leaving dirty, unstaged work). Returns
+    /// once the tree is in that state. Skips (returns false) if git is absent.
+    fn git_repo_with_uncommitted(
+        dir: &Path,
+        path: &str,
+        committed: &str,
+        uncommitted: &str,
+    ) -> bool {
+        use std::process::Command;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return false;
+        }
+        let _ = git(&["config", "user.email", "t@t"]);
+        let _ = git(&["config", "user.name", "t"]);
+        fs::write(dir.join(path), committed).unwrap();
+        if !git(&["add", path]) || !git(&["commit", "-qm", "init"]) {
+            return false;
+        }
+        // The user's in-flight, uncommitted edit.
+        fs::write(dir.join(path), uncommitted).unwrap();
+        true
+    }
+
+    #[tokio::test]
+    async fn test_backup_rollback_preserves_uncommitted_user_work() {
+        let dir = TempDir::new().unwrap();
+        // Committed "A", user edited to "fn user_wip() {}" without committing.
+        if !git_repo_with_uncommitted(
+            dir.path(),
+            "test.rs",
+            "fn committed() {}",
+            "fn user_wip() {}",
+        ) {
+            eprintln!("git unavailable; skipping");
+            return;
+        }
+
+        // llm-mux edits the user's in-flight version, then verify fails.
+        let source_output =
+            r#"{"path": "test.rs", "old": "fn user_wip() {}", "new": "fn llm_edit() {}"}"#;
+        let config = ApplyVerifyConfig {
+            source_step: "test".into(),
+            verify_command: Some("false".into()),
+            verify_retries: 0,
+            rollback_strategy: RollbackStrategy::Backup,
+            ..Default::default()
+        };
+
+        let result = apply_and_verify(source_output, &config, dir.path()).await;
+        assert!(matches!(
+            result,
+            Err(ApplyVerifyError::MaxRetriesExceeded { .. })
+        ));
+
+        // Must restore the user's uncommitted work, NOT git's committed HEAD.
+        let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
+        assert_eq!(
+            content, "fn user_wip() {}",
+            "backup rollback must restore the user's uncommitted state, not HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_rollback_loses_uncommitted_work_regression_guard() {
+        // Documents exactly why Backup is the default: the Git strategy
+        // restores to HEAD, discarding the user's uncommitted edit. If this
+        // ever stops being true (git rollback learns to preserve the tree),
+        // revisit the default.
+        let dir = TempDir::new().unwrap();
+        if !git_repo_with_uncommitted(
+            dir.path(),
+            "test.rs",
+            "fn committed() {}",
+            "fn user_wip() {}",
+        ) {
+            eprintln!("git unavailable; skipping");
+            return;
+        }
+
+        let source_output =
+            r#"{"path": "test.rs", "old": "fn user_wip() {}", "new": "fn llm_edit() {}"}"#;
+        let config = ApplyVerifyConfig {
+            source_step: "test".into(),
+            verify_command: Some("false".into()),
+            verify_retries: 0,
+            rollback_strategy: RollbackStrategy::Git,
+            ..Default::default()
+        };
+
+        let _ = apply_and_verify(source_output, &config, dir.path()).await;
+
+        let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
+        assert_eq!(
+            content, "fn committed() {}",
+            "git rollback restores to HEAD (this is the data-loss the Backup default avoids)"
+        );
+    }
+
     #[tokio::test]
     async fn test_apply_no_verify() {
         let dir = TempDir::new().unwrap();
@@ -338,7 +481,9 @@ mod tests {
     fn test_config_default() {
         let config = ApplyVerifyConfig::default();
         assert_eq!(config.verify_retries, 0);
-        assert_eq!(config.rollback_strategy, RollbackStrategy::Git);
+        // Default rollback preserves the user's pre-run state (see
+        // RollbackStrategy docs); Git-checkout rollback is opt-in only.
+        assert_eq!(config.rollback_strategy, RollbackStrategy::Backup);
         assert!(config.verify_timeout.is_some());
     }
 

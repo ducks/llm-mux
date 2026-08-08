@@ -4,10 +4,12 @@ use super::edit_parser::{DiffHunk, DiffLine, EditOperation, normalize_whitespace
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// Maximum line drift for fuzzy hunk matching
 const MAX_LINE_DRIFT: usize = 3;
+static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Errors during diff application
 #[derive(Debug, Error)]
@@ -32,6 +34,17 @@ pub enum ApplyError {
 
     #[error("multiple matches for old text in {path}")]
     AmbiguousMatch { path: PathBuf },
+
+    #[error(
+        "refusing to edit path '{path}' outside the working directory (edits are confined to the project tree)"
+    )]
+    PathEscape { path: PathBuf },
+
+    #[error("apply failed: {apply_error}; rollback also failed: {rollback_errors}")]
+    RollbackFailed {
+        apply_error: String,
+        rollback_errors: String,
+    },
 }
 
 /// Result of applying edits
@@ -65,6 +78,73 @@ impl DiffApplier {
         }
     }
 
+    /// Resolve an edit's target path against the working directory, refusing
+    /// anything that would escape the project tree.
+    ///
+    /// The apply-and-verify path acts on paths an LLM produced, so a
+    /// hallucinated or prompt-injected `/etc/...` or `../../` must never write
+    /// outside `working_dir`. Three ways a path can escape, all rejected here:
+    ///
+    /// 1. **Absolute path** — `Path::join` discards the base entirely, so
+    ///    `working_dir.join("/etc/passwd")` is `/etc/passwd`. Rejected before
+    ///    the join.
+    /// 2. **`..` traversal** — any `ParentDir` component can climb out.
+    ///    Rejected lexically, before touching the filesystem.
+    /// 3. **Symlink escape** — a path (or a parent directory) that is a symlink
+    ///    pointing outside the tree. Caught by canonicalizing the deepest
+    ///    existing ancestor and confirming it stays under the canonical root.
+    ///
+    /// Returns the joined (non-canonical) path to use for the actual I/O, so
+    /// callers keep operating on paths relative to `working_dir` as before.
+    fn resolve_path(&self, path: &Path) -> Result<PathBuf, ApplyError> {
+        use std::path::Component;
+
+        // (1) and (2): reject absolute paths, root/prefix components, and any
+        // `..` lexically. `.` and normal components are fine.
+        for component in path.components() {
+            match component {
+                Component::Normal(_) | Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(ApplyError::PathEscape {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+        }
+
+        let joined = self.working_dir.join(path);
+
+        // (3): canonicalize the deepest ancestor that exists on disk (the full
+        // path may not exist yet for a create) and require it to stay under the
+        // canonical working-dir root. This resolves symlinks in the prefix.
+        let root = self
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.working_dir.clone());
+
+        let mut ancestor = joined.as_path();
+        let real_ancestor = loop {
+            if let Ok(real) = ancestor.canonicalize() {
+                break real;
+            }
+            match ancestor.parent() {
+                Some(parent) => ancestor = parent,
+                // Walked past the root without finding an existing ancestor;
+                // fall back to the lexically-cleaned join under root, which the
+                // component check above already proved cannot climb out.
+                None => return Ok(joined),
+            }
+        };
+
+        if real_ancestor.starts_with(&root) {
+            Ok(joined)
+        } else {
+            Err(ApplyError::PathEscape {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
     /// Apply all edit operations
     pub fn apply(&self, edits: &[EditOperation]) -> Result<ApplyResult, ApplyError> {
         let mut modified_files = Vec::new();
@@ -77,18 +157,18 @@ impl DiffApplier {
         })?;
 
         for edit in edits {
-            match edit {
+            let result = (|| match edit {
                 EditOperation::UnifiedDiff { path, hunks } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     let backup = self.create_backup(&full_path)?;
-                    self.apply_unified_diff(&full_path, hunks)?;
                     modified_files.push(ModifiedFile {
-                        path: full_path,
+                        path: full_path.clone(),
                         backup_path: backup,
                     });
+                    self.apply_unified_diff(&full_path, hunks)
                 }
                 EditOperation::OldNewPair { path, old, new } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     // Empty old means create new file
                     if old.is_empty() {
                         if let Some(parent) = full_path.parent() {
@@ -97,22 +177,24 @@ impl DiffApplier {
                                 source: e,
                             })?;
                         }
+                        // Track the file before writing so a partial write is
+                        // removed if this operation fails.
+                        created_files.push(full_path.clone());
                         fs::write(&full_path, new).map_err(|e| ApplyError::WriteError {
                             path: full_path.clone(),
                             source: e,
-                        })?;
-                        created_files.push(full_path);
+                        })
                     } else {
                         let backup = self.create_backup(&full_path)?;
-                        self.apply_old_new(&full_path, old, new)?;
                         modified_files.push(ModifiedFile {
-                            path: full_path,
+                            path: full_path.clone(),
                             backup_path: backup,
                         });
+                        self.apply_old_new(&full_path, old, new)
                     }
                 }
                 EditOperation::FullFile { path, content } => {
-                    let full_path = self.working_dir.join(path);
+                    let full_path = self.resolve_path(path)?;
                     if full_path.exists() {
                         let backup = self.create_backup(&full_path)?;
                         modified_files.push(ModifiedFile {
@@ -132,8 +214,20 @@ impl DiffApplier {
                     fs::write(&full_path, content).map_err(|e| ApplyError::WriteError {
                         path: full_path,
                         source: e,
-                    })?;
+                    })
                 }
+            })();
+
+            if let Err(apply_error) = result {
+                if let Err(rollback_errors) =
+                    Self::rollback_partial(&modified_files, &created_files)
+                {
+                    return Err(ApplyError::RollbackFailed {
+                        apply_error: apply_error.to_string(),
+                        rollback_errors,
+                    });
+                }
+                return Err(apply_error);
             }
         }
 
@@ -141,6 +235,42 @@ impl DiffApplier {
             modified_files,
             created_files,
         })
+    }
+
+    fn rollback_partial(
+        modified_files: &[ModifiedFile],
+        created_files: &[PathBuf],
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+
+        for file in modified_files.iter().rev() {
+            if let Err(error) = fs::copy(&file.backup_path, &file.path) {
+                errors.push(format!("restore {}: {}", file.path.display(), error));
+            }
+            if let Err(error) = fs::remove_file(&file.backup_path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                errors.push(format!(
+                    "remove backup {}: {}",
+                    file.backup_path.display(),
+                    error
+                ));
+            }
+        }
+
+        for path in created_files.iter().rev() {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                errors.push(format!("remove created file {}: {}", path.display(), error));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     /// Create a backup of a file before modification
@@ -159,8 +289,15 @@ impl DiffApplier {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
-        let backup_name = format!("{}.{}", filename, timestamp);
+            .as_nanos();
+        let sequence = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let backup_name = format!(
+            "{}.{}.{}.{}",
+            filename,
+            std::process::id(),
+            timestamp,
+            sequence
+        );
         let backup_path = self.backup_dir.join(backup_name);
 
         fs::copy(path, &backup_path).map_err(|e| ApplyError::BackupError {
@@ -523,6 +660,197 @@ mod tests {
 
         let result = applier.apply(&edits);
         assert!(matches!(result, Err(ApplyError::OldTextNotFound { .. })));
+    }
+
+    #[test]
+    fn test_batch_failure_rolls_back_prior_modifications_and_creations() {
+        let dir = TempDir::new().unwrap();
+        let existing = setup_test_file(dir.path(), "existing.rs", "original");
+        let created = dir.path().join("created.rs");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: "original".into(),
+                new: "modified".into(),
+            },
+            EditOperation::FullFile {
+                path: PathBuf::from("created.rs"),
+                content: "created".into(),
+            },
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: "not present".into(),
+                new: "never written".into(),
+            },
+        ];
+
+        assert!(applier.apply(&edits).is_err());
+        assert_eq!(fs::read_to_string(existing).unwrap(), "original");
+        assert!(!created.exists());
+    }
+
+    #[test]
+    fn test_same_named_files_get_distinct_backups() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("one")).unwrap();
+        fs::create_dir_all(dir.path().join("two")).unwrap();
+        setup_test_file(&dir.path().join("one"), "mod.rs", "one");
+        setup_test_file(&dir.path().join("two"), "mod.rs", "two");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![
+            EditOperation::FullFile {
+                path: PathBuf::from("one/mod.rs"),
+                content: "changed one".into(),
+            },
+            EditOperation::FullFile {
+                path: PathBuf::from("two/mod.rs"),
+                content: "changed two".into(),
+            },
+        ];
+
+        let result = applier.apply(&edits).unwrap();
+        assert_ne!(
+            result.modified_files[0].backup_path,
+            result.modified_files[1].backup_path
+        );
+        assert_eq!(
+            fs::read_to_string(&result.modified_files[0].backup_path).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(&result.modified_files[1].backup_path).unwrap(),
+            "two"
+        );
+    }
+
+    #[test]
+    fn test_rejects_absolute_path() {
+        // Path::join discards the base on an absolute path, so without the
+        // guard this would target /tmp/llmux-escape-test directly.
+        let dir = TempDir::new().unwrap();
+        let applier = DiffApplier::new(dir.path());
+
+        let escape = std::env::temp_dir().join("llmux-escape-test-abs");
+        let _ = fs::remove_file(&escape);
+        let edits = vec![EditOperation::FullFile {
+            path: escape.clone(),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(!escape.exists(), "absolute path escaped confinement");
+    }
+
+    #[test]
+    fn test_rejects_parent_traversal() {
+        // The working dir is a subdir; `../` would climb into its parent.
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let applier = DiffApplier::new(&work);
+
+        let target = root.path().join("sibling.txt");
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("../sibling.txt"),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(!target.exists(), "../ traversal escaped confinement");
+    }
+
+    #[test]
+    fn test_rejects_parent_traversal_for_old_new_create() {
+        // Same escape via the OldNewPair create path (empty `old`).
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let applier = DiffApplier::new(&work);
+
+        let edits = vec![EditOperation::OldNewPair {
+            path: PathBuf::from("../../etc-ish/passwd"),
+            old: String::new(),
+            new: "pwned".to_string(),
+        }];
+
+        assert!(matches!(
+            applier.apply(&edits),
+            Err(ApplyError::PathEscape { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rejects_symlinked_parent_escape() {
+        // A directory inside the working dir is a symlink pointing outside it.
+        // Lexically the path stays inside; only canonicalization catches it.
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // work/link -> ../outside
+        symlink(&outside, work.join("link")).unwrap();
+
+        let applier = DiffApplier::new(&work);
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("link/pwned.txt"),
+            content: "pwned".to_string(),
+        }];
+
+        let result = applier.apply(&edits);
+        assert!(matches!(result, Err(ApplyError::PathEscape { .. })));
+        assert!(
+            !outside.join("pwned.txt").exists(),
+            "symlinked parent escaped confinement"
+        );
+    }
+
+    #[test]
+    fn test_allows_legitimate_nested_path() {
+        // Confinement must not break normal nested edits.
+        let dir = TempDir::new().unwrap();
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("src/inner/mod.rs"),
+            content: "fn ok() {}".to_string(),
+        }];
+
+        let result = applier.apply(&edits).unwrap();
+        assert_eq!(result.created_files.len(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/inner/mod.rs")).unwrap(),
+            "fn ok() {}"
+        );
+    }
+
+    #[test]
+    fn test_allows_curdir_prefixed_path() {
+        // `./file` is legitimate — must not be mistaken for an escape.
+        let dir = TempDir::new().unwrap();
+        setup_test_file(dir.path(), "test.rs", "old");
+        let applier = DiffApplier::new(dir.path());
+
+        let edits = vec![EditOperation::OldNewPair {
+            path: PathBuf::from("./test.rs"),
+            old: "old".to_string(),
+            new: "new".to_string(),
+        }];
+
+        assert!(applier.apply(&edits).is_ok());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("test.rs")).unwrap(),
+            "new"
+        );
     }
 
     #[test]

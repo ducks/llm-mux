@@ -7,6 +7,7 @@ mod logging;
 mod memory;
 mod process;
 mod role;
+mod run_ledger;
 mod template;
 mod workflow;
 
@@ -52,6 +53,14 @@ struct Cli {
     /// Suppress normal output (same as --output=quiet)
     #[arg(long, global = true)]
     quiet: bool,
+
+    /// Trust the project's `.llm-mux/config.toml` to define backend commands.
+    ///
+    /// By default a project config cannot set a backend's `command`/`args` or
+    /// `command_wrapper` (those run as processes, so a hostile repo could run
+    /// arbitrary code). Pass this only in repos you trust.
+    #[arg(long, global = true)]
+    allow_project_backends: bool,
 }
 
 #[derive(Subcommand)]
@@ -68,6 +77,12 @@ enum Commands {
         /// Workflow arguments (key=value or positional)
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+
+    /// Inspect or resume recorded workflow runs
+    Runs {
+        #[command(subcommand)]
+        command: RunCommands,
     },
 
     /// Validate a workflow without running
@@ -117,6 +132,25 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum RunCommands {
+    /// Show a run, its steps, provider usage, and costs
+    Show {
+        /// Numeric run ID
+        id: i64,
+    },
+
+    /// Continue a run from its last successful steps
+    Resume {
+        /// Numeric run ID
+        id: i64,
+
+        /// Preview remaining shell and apply steps without executing them
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -135,10 +169,10 @@ async fn main() -> Result<()> {
         })
     };
 
-    if let Some(ref log_path) = log_file {
-        if cli.debug {
-            eprintln!("Debug logging to: {}", log_path.display());
-        }
+    if let Some(ref log_path) = log_file
+        && cli.debug
+    {
+        eprintln!("Debug logging to: {}", log_path.display());
     }
 
     logging::init_logging(cli.debug, cli.quiet, log_file)?;
@@ -158,9 +192,13 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Load config
-    let config = Arc::new(config::LlmuxConfig::load(Some(&working_dir))?);
-
+    // Load config. Project-local config is untrusted for backend commands
+    // unless the user explicitly opts in.
+    let trust = if cli.allow_project_backends {
+        config::ProjectTrust::Trusted
+    } else {
+        config::ProjectTrust::Untrusted
+    };
     // Setup cancellation token for signal handling
     let cancel_token = signals::CancellationToken::new();
 
@@ -177,6 +215,10 @@ async fn main() -> Result<()> {
             args,
             dry_run,
         } => {
+            let config = Arc::new(config::LlmuxConfig::load_with_trust(
+                Some(&working_dir),
+                trust,
+            )?);
             match commands::run_workflow(
                 &workflow,
                 args,
@@ -186,6 +228,7 @@ async fn main() -> Result<()> {
                 &*handler,
                 cli.output_file.as_deref(),
                 dry_run,
+                cancel_token.clone(),
             )
             .await
             {
@@ -197,6 +240,27 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Runs { command } => match command {
+            RunCommands::Show { id } => match commands::show_run(id, &*handler) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    1
+                }
+            },
+            RunCommands::Resume { id, dry_run } => {
+                match commands::resume_run(id, dry_run, trust, &*handler, cancel_token.clone())
+                    .await
+                {
+                    Ok(code) => code,
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        1
+                    }
+                }
+            }
+        },
+
         Commands::Validate { workflow } => {
             match commands::validate_workflow(&workflow, Some(&working_dir), &*handler) {
                 Ok(code) => code,
@@ -207,34 +271,42 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Doctor => commands::doctor(&config, &working_dir, &*handler).await,
+        Commands::Doctor => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
+            commands::doctor(&config, &working_dir, &*handler).await
+        }
 
         Commands::Backends => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_backends(&config, &*handler);
             0
         }
 
         Commands::Teams => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_teams(&config, &*handler);
             0
         }
 
         Commands::Roles => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_roles(&config, &*handler);
             0
         }
 
         Commands::Ecosystems => {
+            let config = config::LlmuxConfig::load_with_trust(Some(&working_dir), trust)?;
             commands::list_ecosystems(&config, &*handler);
             0
         }
 
-        Commands::Workflows => {
-            handler.emit(cli::OutputEvent::Info {
-                message: "(workflow listing not yet implemented)".into(),
-            });
-            0
-        }
+        Commands::Workflows => match commands::list_workflows(&working_dir, &*handler) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                1
+            }
+        },
 
         Commands::Context => {
             handler.emit(cli::OutputEvent::Info {
@@ -262,4 +334,31 @@ async fn main() -> Result<()> {
     };
 
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_run_ledger_commands() {
+        let show = Cli::try_parse_from(["llmux", "runs", "show", "42"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Commands::Runs {
+                command: RunCommands::Show { id: 42 }
+            }
+        ));
+
+        let resume = Cli::try_parse_from(["llmux", "runs", "resume", "42", "--dry-run"]).unwrap();
+        assert!(matches!(
+            resume.command,
+            Commands::Runs {
+                command: RunCommands::Resume {
+                    id: 42,
+                    dry_run: true
+                }
+            }
+        ));
+    }
 }

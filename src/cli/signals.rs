@@ -2,9 +2,7 @@
 
 //! Signal handling for graceful shutdown
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::watch;
 
 /// Global shutdown flag
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -19,48 +17,8 @@ pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-/// Cancellation token for async operations
-#[derive(Clone)]
-pub struct CancellationToken {
-    sender: Arc<watch::Sender<bool>>,
-    receiver: watch::Receiver<bool>,
-}
-
-impl CancellationToken {
-    /// Create a new cancellation token
-    pub fn new() -> Self {
-        let (sender, receiver) = watch::channel(false);
-        Self {
-            sender: Arc::new(sender),
-            receiver,
-        }
-    }
-
-    /// Cancel the token
-    pub fn cancel(&self) {
-        let _ = self.sender.send(true);
-    }
-
-    /// Check if cancelled
-    pub fn is_cancelled(&self) -> bool {
-        *self.receiver.borrow()
-    }
-
-    /// Wait until cancelled
-    pub async fn cancelled(&mut self) {
-        while !*self.receiver.borrow() {
-            if self.receiver.changed().await.is_err() {
-                break;
-            }
-        }
-    }
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Cancellation token shared by workflows and their child processes.
+pub type CancellationToken = tokio_util::sync::CancellationToken;
 
 /// Setup signal handlers
 ///
@@ -139,19 +97,9 @@ pub async fn with_cancellation<F, T>(token: CancellationToken, future: F) -> Opt
 where
     F: std::future::Future<Output = T>,
 {
-    let mut cancel_receiver = token.receiver.clone();
-
     tokio::select! {
         result = future => Some(result),
-        _ = async {
-            while !*cancel_receiver.borrow() {
-                if cancel_receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        } => {
-            None
-        }
+        _ = token.cancelled() => None,
     }
 }
 

@@ -136,14 +136,14 @@ impl WorkflowState {
         }
 
         // Add ecosystem config if present
-        if let Some(ref ecosystem_name) = self.ecosystem {
-            if let Some(ref ecosystem_config) = self.ecosystem_config {
-                ctx.set_ecosystem(
-                    ecosystem_name.clone(),
-                    ecosystem_config.clone(),
-                    self.current_project.clone(),
-                );
-            }
+        if let Some(ref ecosystem_name) = self.ecosystem
+            && let Some(ref ecosystem_config) = self.ecosystem_config
+        {
+            ctx.set_ecosystem(
+                ecosystem_name.clone(),
+                ecosystem_config.clone(),
+                self.current_project.clone(),
+            );
         }
 
         // Add workflow name

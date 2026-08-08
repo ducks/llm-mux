@@ -1,8 +1,12 @@
 //! CLI command implementations
 
 use super::output::{OutputEvent, OutputHandler};
-use crate::config::{LlmuxConfig, load_workflow};
+use super::signals::CancellationToken;
+use crate::config::{
+    LlmuxConfig, ProjectTrust, WorkflowConfig, available_workflows, load_workflow,
+};
 use crate::role::detect_team;
+use crate::run_ledger::RunLedger;
 use crate::workflow::WorkflowRunner;
 use std::collections::HashMap;
 use std::path::Path;
@@ -118,6 +122,10 @@ impl ProjectType {
 }
 
 /// Run a workflow
+// This is the single top-level CLI entry point; its arguments map 1:1 to
+// distinct CLI flags, so a params struct would add indirection without
+// grouping anything that naturally belongs together.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     workflow_name: &str,
     args: Vec<String>,
@@ -127,13 +135,21 @@ pub async fn run_workflow(
     handler: &dyn OutputHandler,
     output_file: Option<&Path>,
     dry_run: bool,
+    cancellation: CancellationToken,
 ) -> Result<i32, String> {
     // Load workflow
     let workflow = load_workflow(workflow_name, Some(working_dir))
         .map_err(|e| format!("Failed to load workflow '{}': {}", workflow_name, e))?;
 
     // Parse workflow args (simple key=value for now)
-    let parsed_args = parse_workflow_args(&args);
+    let parsed_args = resolve_workflow_args(&workflow, &args)?;
+    let ledger_path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let mut ledger = RunLedger::open(&ledger_path)
+        .map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let run_id = ledger
+        .start_run(workflow_name, working_dir, &parsed_args, team_override)
+        .map_err(|error| format!("Failed to start run record: {error}"))?;
 
     if dry_run {
         handler.emit(OutputEvent::Info {
@@ -149,10 +165,32 @@ pub async fn run_workflow(
     // Create runner and execute
     let runner = WorkflowRunner::new(config.clone());
 
-    let result = runner
-        .run(workflow.clone(), parsed_args, working_dir, team_override, dry_run)
+    let result = match runner
+        .run_with_cancellation(
+            workflow.clone(),
+            parsed_args,
+            working_dir,
+            team_override,
+            dry_run,
+            cancellation,
+        )
         .await
-        .map_err(|e| format!("Workflow execution failed: {}", e))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("Workflow execution failed: {error}");
+            if let Err(ledger_error) = ledger.fail_run(run_id, &message) {
+                tracing::error!(error = %ledger_error, run_id, "Failed to finalize run ledger");
+            }
+            return Err(message);
+        }
+    };
+    ledger
+        .complete_run(run_id, &workflow, &result)
+        .map_err(|error| format!("Failed to finalize run record {run_id}: {error}"))?;
+    handler.emit(OutputEvent::Info {
+        message: format!("Run recorded as #{run_id}"),
+    });
 
     // Emit completion event
     handler.emit(OutputEvent::WorkflowComplete {
@@ -174,47 +212,198 @@ pub async fn run_workflow(
         })
         .or_else(|| result.steps.get("final").and_then(|s| s.output.as_deref()))
         .or_else(|| {
-            // Fallback: get any step with output (last by hash iteration)
-            result
-                .steps
-                .values()
-                .filter_map(|s| s.output.as_deref())
-                .last()
+            // Deterministic fallback: last declared step that produced output.
+            workflow.steps.iter().rev().find_map(|step| {
+                result
+                    .steps
+                    .get(&step.name)
+                    .and_then(|result| result.output.as_deref())
+            })
         });
 
     // Write to file if specified
-    if let Some(path) = output_file {
-        if let Some(output) = final_output {
-            // Create parent directories if they don't exist
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!("Failed to create directory {}: {}", parent.display(), e)
-                })?;
-            }
-            std::fs::write(path, output)
-                .map_err(|e| format!("Failed to write output to {}: {}", path.display(), e))?;
+    if let Some(path) = output_file
+        && let Some(output) = final_output
+    {
+        // Create parent directories if they don't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
+        std::fs::write(path, output)
+            .map_err(|e| format!("Failed to write output to {}: {}", path.display(), e))?;
     }
 
     handler.result(result.success, final_output);
 
-    // Always write final output to console AND file if present
+    // Always write final output to console. Per-step outputs already live in
+    // the runner's private, unique artifact directory.
     if let Some(output) = final_output {
         eprintln!("\n=== Workflow Output ===");
         println!("{}", output);
-
-        // ALWAYS write to a temp file so we don't lose reports
-        let report_file = std::env::temp_dir()
-            .join(format!("llm-mux-{}-report.txt", workflow_name))
-            .display()
-            .to_string();
-        if let Err(e) = std::fs::write(&report_file, output) {
-            eprintln!("Warning: Failed to write report to {}: {}", report_file, e);
-        } else {
-            eprintln!("\nReport saved to: {}", report_file);
-        }
+    }
+    if let Some(output_dir) = result.output_dir.as_deref() {
+        eprintln!("\nWorkflow artifacts saved to: {}", output_dir);
     }
 
+    Ok(if result.success { 0 } else { 1 })
+}
+
+/// Display a durable workflow run record.
+pub fn show_run(run_id: i64, handler: &dyn OutputHandler) -> Result<i32, String> {
+    let path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let ledger =
+        RunLedger::open(&path).map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let run = ledger
+        .get_run(run_id)
+        .map_err(|error| format!("Failed to load run {run_id}: {error}"))?
+        .ok_or_else(|| format!("Run {run_id} not found"))?;
+
+    handler.emit(OutputEvent::Info {
+        message: format!(
+            "Run #{}: {} [{}]\nDirectory: {}\nStarted: {}\nFinished: {}\nDuration: {}\nArtifacts: {}",
+            run.id,
+            run.workflow_name,
+            run.status,
+            run.working_dir.display(),
+            run.started_at,
+            run.finished_at.as_deref().unwrap_or("-"),
+            run.duration_ms
+                .map(|duration| format!("{duration}ms"))
+                .unwrap_or_else(|| "-".into()),
+            run.output_dir.as_deref().unwrap_or("-"),
+        ),
+    });
+    for step in &run.steps {
+        handler.emit(OutputEvent::Info {
+            message: format!(
+                "\n[{}] {} [{}] {}ms\nInput:\n{}\nOutput:\n{}{}",
+                step.position + 1,
+                step.name,
+                step.status,
+                step.duration_ms,
+                step.rendered_input.as_deref().unwrap_or("-"),
+                step.output.as_deref().unwrap_or("-"),
+                step.error
+                    .as_deref()
+                    .map(|error| format!("\nError: {error}"))
+                    .unwrap_or_default(),
+            ),
+        });
+        for backend in &step.backend_runs {
+            handler.emit(OutputEvent::Info {
+                message: format!(
+                    "  backend={} model={} tokens={}/{}/{} cost={} duration={}ms{}",
+                    backend.backend,
+                    backend.model.as_deref().unwrap_or("-"),
+                    backend
+                        .prompt_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .completion_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .total_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    backend
+                        .estimated_cost_usd
+                        .map(|value| format!("${value:.6}"))
+                        .unwrap_or_else(|| "unknown".into()),
+                    backend.duration_ms,
+                    backend
+                        .error
+                        .as_deref()
+                        .map(|error| format!(" error={error}"))
+                        .unwrap_or_default(),
+                ),
+            });
+        }
+    }
+    if let Some(error) = run.error.as_deref() {
+        handler.emit(OutputEvent::Info {
+            message: format!("\nRun error: {error}"),
+        });
+    }
+    Ok(0)
+}
+
+/// Resume a recorded workflow, retaining only successful prior steps.
+pub async fn resume_run(
+    previous_run_id: i64,
+    dry_run: bool,
+    trust: ProjectTrust,
+    handler: &dyn OutputHandler,
+    cancellation: CancellationToken,
+) -> Result<i32, String> {
+    let path = RunLedger::default_path()
+        .map_err(|error| format!("Failed to locate run ledger: {error}"))?;
+    let mut ledger =
+        RunLedger::open(&path).map_err(|error| format!("Failed to open run ledger: {error}"))?;
+    let previous = ledger
+        .get_run(previous_run_id)
+        .map_err(|error| format!("Failed to load run {previous_run_id}: {error}"))?
+        .ok_or_else(|| format!("Run {previous_run_id} not found"))?;
+    let workflow = load_workflow(&previous.workflow_name, Some(&previous.working_dir))
+        .map_err(|error| format!("Failed to reload workflow: {error}"))?;
+    let config = Arc::new(
+        LlmuxConfig::load_with_trust(Some(&previous.working_dir), trust)
+            .map_err(|error| format!("Failed to reload configuration: {error}"))?,
+    );
+    let completed_steps = RunLedger::resumable_steps(&previous);
+    let run_id = ledger
+        .start_run(
+            &previous.workflow_name,
+            &previous.working_dir,
+            &previous.args,
+            previous.team.as_deref(),
+        )
+        .map_err(|error| format!("Failed to start resumed run: {error}"))?;
+
+    handler.emit(OutputEvent::Info {
+        message: format!(
+            "Resuming run #{previous_run_id} as #{run_id}; reusing {} successful step(s)",
+            completed_steps.len()
+        ),
+    });
+    handler.emit(OutputEvent::WorkflowStart {
+        name: workflow.name.clone(),
+        steps: workflow.steps.len(),
+    });
+    let runner = WorkflowRunner::new(config);
+    let result = match runner
+        .run_resuming_with_cancellation(
+            workflow.clone(),
+            previous.args,
+            &previous.working_dir,
+            previous.team.as_deref(),
+            dry_run,
+            cancellation,
+            completed_steps,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("Workflow resume failed: {error}");
+            let _ = ledger.fail_run(run_id, &message);
+            return Err(message);
+        }
+    };
+    ledger
+        .complete_run(run_id, &workflow, &result)
+        .map_err(|error| format!("Failed to finalize resumed run: {error}"))?;
+    handler.emit(OutputEvent::WorkflowComplete {
+        success: result.success,
+        duration_ms: result.duration.as_millis() as u64,
+        steps_completed: result.steps.len(),
+    });
+    handler.emit(OutputEvent::Info {
+        message: format!("Run recorded as #{run_id}"),
+    });
     Ok(if result.success { 0 } else { 1 })
 }
 
@@ -232,6 +421,40 @@ fn parse_workflow_args(args: &[String]) -> HashMap<String, String> {
     }
 
     parsed
+}
+
+fn resolve_workflow_args(
+    workflow: &WorkflowConfig,
+    args: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut resolved = workflow
+        .args
+        .iter()
+        .filter_map(|(name, definition)| {
+            definition
+                .default
+                .as_ref()
+                .map(|value| (name.clone(), value.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    resolved.extend(parse_workflow_args(args));
+
+    let missing = workflow
+        .args
+        .iter()
+        .filter(|(name, definition)| definition.required && !resolved.contains_key(*name))
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Missing required workflow argument(s): {}. Pass values as name=value.",
+            missing.join(", ")
+        ))
+    }
 }
 
 /// Validate a workflow
@@ -274,6 +497,27 @@ pub fn validate_workflow(
             Ok(1)
         }
     }
+}
+
+/// List project, user, and built-in workflows.
+pub fn list_workflows(working_dir: &Path, handler: &dyn OutputHandler) -> Result<i32, String> {
+    let workflows = available_workflows(Some(working_dir))
+        .map_err(|error| format!("Failed to list workflows: {error}"))?;
+    if workflows.is_empty() {
+        handler.emit(OutputEvent::Info {
+            message: "No workflows found".into(),
+        });
+    } else {
+        handler.emit(OutputEvent::Info {
+            message: "Available workflows:".into(),
+        });
+        for workflow in workflows {
+            handler.emit(OutputEvent::Info {
+                message: format!("  {workflow}"),
+            });
+        }
+    }
+    Ok(0)
 }
 
 /// Check backend availability
@@ -520,13 +764,12 @@ pub async fn init_config(
         .arg("claude")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("claude");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ claude".into(),
-            });
-        }
+        detected_backends.push("claude");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ claude".into(),
+        });
     }
 
     // Check for codex
@@ -534,13 +777,12 @@ pub async fn init_config(
         .arg("codex")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("codex");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ codex".into(),
-            });
-        }
+        detected_backends.push("codex");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ codex".into(),
+        });
     }
 
     // Check for gemini-cli (npx)
@@ -550,13 +792,12 @@ pub async fn init_config(
         .arg("--version")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("gemini");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ gemini".into(),
-            });
-        }
+        detected_backends.push("gemini");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ gemini".into(),
+        });
     }
 
     // Check for ollama
@@ -565,13 +806,12 @@ pub async fn init_config(
         .arg("http://localhost:11434/api/tags")
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            detected_backends.push("ollama");
-            handler.emit(OutputEvent::Info {
-                message: "  ✓ ollama".into(),
-            });
-        }
+        detected_backends.push("ollama");
+        handler.emit(OutputEvent::Info {
+            message: "  ✓ ollama".into(),
+        });
     }
 
     if detected_backends.is_empty() {
@@ -655,7 +895,11 @@ pub async fn init_config(
         config_content.push_str("# Basic roles\n");
         config_content.push_str("[roles.default]\n");
         config_content.push_str("description = \"Default role for general queries\"\n");
-        config_content.push_str(&format!("backends = [\"{}\"]\n", detected_backends[0]));
+        config_content.push_str(&format!(
+            "backends = {}\n",
+            serde_json::to_string(&detected_backends)
+                .map_err(|error| format!("Failed to serialize backend list: {error}"))?
+        ));
         config_content.push_str("execution = \"first\"\n\n");
     } else if let Some(ptype) = project_type {
         // Project-specific roles
@@ -766,6 +1010,40 @@ mod tests {
 
         assert_eq!(parsed.get("arg0"), Some(&"positional".to_string()));
         assert_eq!(parsed.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_workflow_args_applies_defaults_and_checks_required() {
+        let mut workflow = WorkflowConfig::default();
+        workflow.args.insert(
+            "required".into(),
+            crate::config::ArgDef {
+                required: true,
+                default: None,
+                description: String::new(),
+            },
+        );
+        workflow.args.insert(
+            "optional".into(),
+            crate::config::ArgDef {
+                required: false,
+                default: Some("default value".into()),
+                description: String::new(),
+            },
+        );
+
+        let missing = resolve_workflow_args(&workflow, &[]).unwrap_err();
+        assert!(missing.contains("required"));
+
+        let resolved = resolve_workflow_args(&workflow, &["required=provided".into()]).unwrap();
+        assert_eq!(
+            resolved.get("required").map(String::as_str),
+            Some("provided")
+        );
+        assert_eq!(
+            resolved.get("optional").map(String::as_str),
+            Some("default value")
+        );
     }
 
     #[test]

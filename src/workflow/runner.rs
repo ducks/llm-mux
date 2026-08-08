@@ -11,6 +11,7 @@ use minijinja::value::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Errors during workflow execution
@@ -30,6 +31,12 @@ pub enum WorkflowError {
 
     #[error("template error: {0}")]
     Template(#[from] crate::template::TemplateError),
+
+    #[error("workflow timed out after {0:?}")]
+    Timeout(Duration),
+
+    #[error("workflow validation failed:\n  {0}")]
+    InvalidConfiguration(String),
 }
 
 /// Workflow runner
@@ -45,8 +52,8 @@ impl WorkflowRunner {
 
     /// Create output directory for workflow run
     fn create_output_dir(workflow_name: &str) -> Result<PathBuf, WorkflowError> {
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let dir_name = format!("{}-{}", workflow_name, timestamp);
+        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%f");
+        let dir_name = format!("{}-{}-{}", workflow_name, timestamp, std::process::id());
 
         let output_dir = std::env::temp_dir()
             .join("llm-mux")
@@ -57,6 +64,17 @@ impl WorkflowRunner {
             step: "create_output_dir".into(),
             message: format!("Failed to create output directory: {}", e),
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| WorkflowError::StepFailed {
+                    step: "create_output_dir".into(),
+                    message: format!("Failed to secure output directory: {}", e),
+                },
+            )?;
+        }
 
         tracing::info!(path = %output_dir.display(), "Created workflow output directory");
         Ok(output_dir)
@@ -88,6 +106,7 @@ impl WorkflowRunner {
     }
 
     /// Run a workflow
+    #[allow(dead_code)]
     pub async fn run(
         &self,
         workflow: WorkflowConfig,
@@ -95,6 +114,88 @@ impl WorkflowRunner {
         working_dir: &Path,
         team_override: Option<&str>,
         dry_run: bool,
+    ) -> Result<WorkflowResult, WorkflowError> {
+        self.run_with_cancellation(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Run a workflow tied to a caller-owned cancellation token.
+    pub async fn run_with_cancellation(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<WorkflowResult, WorkflowError> {
+        self.run_resuming_with_cancellation(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            cancellation,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// Resume a workflow with successful results restored from a prior run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_resuming_with_cancellation(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
+        completed_steps: HashMap<String, StepResult>,
+    ) -> Result<WorkflowResult, WorkflowError> {
+        let timeout_duration = workflow.timeout.map(Duration::from_millis);
+        let execution = self.run_inner(
+            workflow,
+            args,
+            working_dir,
+            team_override,
+            dry_run,
+            cancellation.clone(),
+            completed_steps,
+        );
+        tokio::pin!(execution);
+
+        if let Some(duration) = timeout_duration {
+            tokio::select! {
+                result = &mut execution => result,
+                _ = tokio::time::sleep(duration) => {
+                    cancellation.cancel();
+                    let _ = execution.await;
+                    Err(WorkflowError::Timeout(duration))
+                }
+            }
+        } else {
+            execution.await
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner(
+        &self,
+        workflow: WorkflowConfig,
+        args: HashMap<String, String>,
+        working_dir: &Path,
+        team_override: Option<&str>,
+        dry_run: bool,
+        cancellation: tokio_util::sync::CancellationToken,
+        completed_steps: HashMap<String, StepResult>,
     ) -> Result<WorkflowResult, WorkflowError> {
         // Validate workflow first
         self.validate_workflow(&workflow)?;
@@ -110,31 +211,50 @@ impl WorkflowRunner {
 
         // Create state
         let mut state = WorkflowState::new(workflow.clone(), args, working_dir.to_path_buf());
-
-        if let Some(ref team_name) = team {
-            if let Some(team_config) = self.config.teams.get(team_name) {
-                state = state.with_team(team_name.clone(), team_config.clone());
+        for (step_name, result) in completed_steps {
+            if workflow.steps.iter().any(|step| step.name == step_name) && !result.failed {
+                state.add_result(&step_name, result, true);
             }
         }
 
-        if let Some((ecosystem_name, project_name)) = ecosystem {
-            if let Some(ecosystem_config) = self.config.ecosystems.get(&ecosystem_name) {
-                state = state.with_ecosystem(
-                    ecosystem_name.clone(),
-                    ecosystem_config.clone(),
-                    Some(project_name),
-                );
-            }
+        if let Some(ref team_name) = team
+            && let Some(team_config) = self.config.teams.get(team_name)
+        {
+            state = state.with_team(team_name.clone(), team_config.clone());
+        }
+
+        if let Some((ecosystem_name, project_name)) = ecosystem
+            && let Some(ecosystem_config) = self.config.ecosystems.get(&ecosystem_name)
+        {
+            state = state.with_ecosystem(
+                ecosystem_name.clone(),
+                ecosystem_config.clone(),
+                Some(project_name),
+            );
         }
 
         // Create execution context
-        let ctx = ExecutionContext::new(self.config.clone(), dry_run);
+        let ctx = ExecutionContext::new_with_cancellation(
+            self.config.clone(),
+            dry_run,
+            Some(cancellation.clone()),
+        );
 
         // Get execution order
         let order = self.topological_sort(&workflow)?;
 
         // Execute steps in order
-        for step_name in order {
+        'steps: for step_name in order {
+            if state.has_result(&step_name) {
+                tracing::info!(step = %step_name, "Reusing successful step from prior run");
+                continue;
+            }
+            if cancellation.is_cancelled() {
+                return Err(WorkflowError::StepFailed {
+                    step: step_name,
+                    message: "workflow cancelled".into(),
+                });
+            }
             if state.failed && !workflow.continue_on_error {
                 break;
             }
@@ -193,7 +313,12 @@ impl WorkflowRunner {
 
                                 results.push(StepResult::failure(error_msg, 0));
                             }
-                            Err(e) => return Err(e.into()),
+                            Err(e) => {
+                                results.push(StepResult::failure(e.to_string(), 0));
+                                let aggregated = self.aggregate_for_each_results(results);
+                                state.add_result(&step_name, aggregated, step.continue_on_error);
+                                break 'steps;
+                            }
                         }
                     }
                     // Clear item after loop
@@ -209,19 +334,19 @@ impl WorkflowRunner {
                     {
                         Ok(result) => {
                             // Save step output to file
-                            if let Some(ref output) = result.output {
-                                if let Err(e) = Self::save_step_output(
+                            if let Some(ref output) = result.output
+                                && let Err(e) = Self::save_step_output(
                                     &output_dir,
                                     &step_name,
                                     output,
                                     result.failed,
-                                ) {
-                                    tracing::warn!(
-                                        step = &step_name,
-                                        error = %e,
-                                        "Failed to save step output"
-                                    );
-                                }
+                                )
+                            {
+                                tracing::warn!(
+                                    step = &step_name,
+                                    error = %e,
+                                    "Failed to save step output"
+                                );
                             }
 
                             state.add_result(&step_name, result, step.continue_on_error);
@@ -256,10 +381,8 @@ impl WorkflowRunner {
                                 );
                             }
 
-                            return Err(WorkflowError::StepFailed {
-                                step: step_name.clone(),
-                                message: error_msg,
-                            });
+                            state.add_result(&step_name, StepResult::failure(error_msg, 0), false);
+                            break 'steps;
                         }
                     }
                 }
@@ -293,7 +416,9 @@ impl WorkflowRunner {
             }
         }
 
-        Ok(())
+        workflow
+            .validate()
+            .map_err(|errors| WorkflowError::InvalidConfiguration(errors.join("\n  ")))
     }
 
     /// Topological sort of steps based on dependencies
@@ -401,6 +526,7 @@ impl WorkflowRunner {
         let mut any_failed = false;
         let mut total_duration = 0u64;
         let mut backends = Vec::new();
+        let mut backend_runs = Vec::new();
 
         for result in results {
             if let Some(output) = result.output {
@@ -414,6 +540,7 @@ impl WorkflowRunner {
             }
             total_duration += result.duration_ms;
             backends.extend(result.backends);
+            backend_runs.extend(result.backend_runs);
         }
 
         StepResult {
@@ -428,6 +555,8 @@ impl WorkflowRunner {
             duration_ms: total_duration,
             backend: backends.first().cloned(),
             backends,
+            backend_runs,
+            ..Default::default()
         }
     }
 }
@@ -522,6 +651,31 @@ mod tests {
         assert!(result.step_output("step2").is_some());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_workflow_timeout_is_enforced() {
+        let config = Arc::new(create_test_config());
+        let runner = WorkflowRunner::new(config);
+        let workflow = WorkflowConfig {
+            name: "timeout".into(),
+            timeout: Some(50),
+            steps: vec![StepConfig {
+                name: "slow".into(),
+                step_type: StepType::Shell,
+                run: Some("sleep 1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dir = TempDir::new().unwrap();
+
+        let result = runner
+            .run(workflow, HashMap::new(), dir.path(), None, false)
+            .await;
+
+        assert!(matches!(result, Err(WorkflowError::Timeout(_))));
+    }
+
     #[test]
     fn test_topological_sort() {
         let config = Arc::new(create_test_config());
@@ -613,7 +767,10 @@ mod tests {
         args.insert("message".into(), "hello from args".into());
 
         let dir = TempDir::new().unwrap();
-        let result = runner.run(workflow, args, dir.path(), None, false).await.unwrap();
+        let result = runner
+            .run(workflow, args, dir.path(), None, false)
+            .await
+            .unwrap();
 
         assert!(result.success);
         assert!(
@@ -662,5 +819,51 @@ mod tests {
                 .unwrap()
                 .contains("first_output")
         );
+    }
+
+    #[tokio::test]
+    async fn test_resume_reuses_successful_steps_and_runs_remaining_tail() {
+        let config = Arc::new(create_test_config());
+        let runner = WorkflowRunner::new(config);
+        let workflow = WorkflowConfig {
+            name: "resume".into(),
+            steps: vec![
+                StepConfig {
+                    name: "first".into(),
+                    step_type: StepType::Shell,
+                    run: Some("touch should-not-exist".into()),
+                    ..Default::default()
+                },
+                StepConfig {
+                    name: "second".into(),
+                    step_type: StepType::Shell,
+                    run: Some("printf '%s' {{ steps.first.output }}".into()),
+                    depends_on: vec!["first".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let completed = HashMap::from([(
+            "first".into(),
+            StepResult::success("restored".into(), "shell".into(), 1),
+        )]);
+        let dir = TempDir::new().unwrap();
+        let result = runner
+            .run_resuming_with_cancellation(
+                workflow,
+                HashMap::new(),
+                dir.path(),
+                None,
+                false,
+                tokio_util::sync::CancellationToken::new(),
+                completed,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(!dir.path().join("should-not-exist").exists());
+        assert_eq!(result.step_output("second"), Some("restored"));
     }
 }

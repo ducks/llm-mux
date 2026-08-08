@@ -1,6 +1,6 @@
 [package]
 name = "llm-mux"
-version = "20260626.0.1"
+version = "20260725.0.0"
 edition = "2024"
 description = "Multiplexer for LLMs - route prompts to multiple backends"
 license = "MIT"
@@ -21,6 +21,7 @@ anyhow = "1.0"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "stream"] }

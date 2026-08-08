@@ -51,14 +51,14 @@ pub fn analyze_project(
     }
 
     // Project type
-    if let Some(ref project_type) = project.project_type {
-        if !project_type.is_empty() {
-            facts.push(DiscoveredFact {
-                fact: format!("{} is a {} project", project_name, project_type),
-                source: "config".to_string(),
-                confidence: 1.0,
-            });
-        }
+    if let Some(ref project_type) = project.project_type
+        && !project_type.is_empty()
+    {
+        facts.push(DiscoveredFact {
+            fact: format!("{} is a {} project", project_name, project_type),
+            source: "config".to_string(),
+            confidence: 1.0,
+        });
     }
 
     // Project description
@@ -142,10 +142,10 @@ fn analyze_ruby_project(
         // Extract key gems
         let mut gems = Vec::new();
         for line in content.lines() {
-            if let Some(gem_name) = extract_gem_name(line) {
-                if is_notable_gem(&gem_name) {
-                    gems.push(gem_name);
-                }
+            if let Some(gem_name) = extract_gem_name(line)
+                && is_notable_gem(&gem_name)
+            {
+                gems.push(gem_name);
             }
         }
 
@@ -172,16 +172,16 @@ fn analyze_rust_project(
         let content = std::fs::read_to_string(&cargo_toml)?;
 
         // Parse as TOML and extract dependencies
-        if let Ok(parsed) = content.parse::<toml::Value>() {
-            if let Some(deps) = parsed.get("dependencies").and_then(|v| v.as_table()) {
-                let dep_names: Vec<_> = deps.keys().map(|k| k.as_str()).collect();
-                if !dep_names.is_empty() {
-                    facts.push(DiscoveredFact {
-                        fact: format!("{} uses: {}", project_name, dep_names.join(", ")),
-                        source: "Cargo.toml".to_string(),
-                        confidence: 0.9,
-                    });
-                }
+        if let Ok(parsed) = content.parse::<toml::Value>()
+            && let Some(deps) = parsed.get("dependencies").and_then(|v| v.as_table())
+        {
+            let dep_names: Vec<_> = deps.keys().map(|k| k.as_str()).collect();
+            if !dep_names.is_empty() {
+                facts.push(DiscoveredFact {
+                    fact: format!("{} uses: {}", project_name, dep_names.join(", ")),
+                    source: "Cargo.toml".to_string(),
+                    confidence: 0.9,
+                });
             }
         }
     }
@@ -295,26 +295,26 @@ fn analyze_readme(project_name: &str, path: &Path, facts: &mut Vec<DiscoveredFac
     // Try common README names
     for readme_name in &["README.md", "README", "readme.md", "Readme.md"] {
         let readme = path.join(readme_name);
-        if readme.exists() {
-            if let Ok(content) = std::fs::read_to_string(&readme) {
-                // Extract first paragraph as description if not too long
-                let first_para = content
-                    .lines()
-                    .skip_while(|line| line.trim().starts_with('#') || line.trim().is_empty())
-                    .take_while(|line| !line.trim().is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
+        if readme.exists()
+            && let Ok(content) = std::fs::read_to_string(&readme)
+        {
+            // Extract first paragraph as description if not too long
+            let first_para = content
+                .lines()
+                .skip_while(|line| line.trim().starts_with('#') || line.trim().is_empty())
+                .take_while(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
 
-                if !first_para.is_empty() && first_para.len() < 300 {
-                    facts.push(DiscoveredFact {
-                        fact: format!("{}: {}", project_name, first_para.trim()),
-                        source: "README".to_string(),
-                        confidence: 0.8,
-                    });
-                }
-
-                break;
+            if !first_para.is_empty() && first_para.len() < 300 {
+                facts.push(DiscoveredFact {
+                    fact: format!("{}: {}", project_name, first_para.trim()),
+                    source: "README".to_string(),
+                    confidence: 0.8,
+                });
             }
+
+            break;
         }
     }
 

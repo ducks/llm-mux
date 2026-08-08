@@ -5,15 +5,17 @@
 use crate::apply_and_verify::RollbackStrategy;
 use crate::apply_and_verify::{ApplyVerifyConfig, ApplyVerifyError, apply_and_verify, apply_only};
 use crate::backend_executor::BackendRequest;
-use crate::config::{LlmuxConfig, StepConfig, StepResult, StepType};
-use crate::process::{OutputStream, OutputWaitError, exit_status_code, wait_for_child_output};
+use crate::config::{LlmuxConfig, RoleExecution, StepConfig, StepResult, StepType};
+use crate::process::{
+    OutputStream, OutputWaitError, configure_child_process, exit_status_code, shell_command,
+    terminate_child_process, wait_for_child_output,
+};
 use crate::role::{RoleExecutor, resolve_role};
 use crate::template::{TemplateContext, TemplateEngine, evaluate_condition};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Errors during step execution
@@ -48,6 +50,9 @@ pub enum StepExecutionError {
 
     #[error("shell command timed out after {0:?}")]
     ShellTimeout(Duration),
+
+    #[error("step cancelled")]
+    Cancelled,
 }
 
 /// Context for step execution
@@ -56,15 +61,25 @@ pub struct ExecutionContext {
     pub template_engine: TemplateEngine,
     pub role_executor: RoleExecutor,
     pub dry_run: bool,
+    pub cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl ExecutionContext {
     pub fn new(config: Arc<LlmuxConfig>, dry_run: bool) -> Self {
+        Self::new_with_cancellation(config, dry_run, None)
+    }
+
+    pub fn new_with_cancellation(
+        config: Arc<LlmuxConfig>,
+        dry_run: bool,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
         Self {
             role_executor: RoleExecutor::new(config.clone()),
             config,
             template_engine: TemplateEngine::new(),
             dry_run,
+            cancellation,
         }
     }
 }
@@ -98,6 +113,7 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: None,
                 backends: Vec::new(),
+                ..Default::default()
             });
         }
     }
@@ -117,6 +133,8 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: Some("shell".into()),
                 backends: vec!["shell".into()],
+                rendered_input: Some(rendered),
+                ..Default::default()
             })
         }
         StepType::Apply if ctx.dry_run => {
@@ -128,7 +146,8 @@ pub async fn execute_step(
                 .unwrap_or_default();
             Ok(StepResult {
                 output: Some(format!(
-                    "[dry-run] would apply edits from step '{}'{}", source, verify
+                    "[dry-run] would apply edits from step '{}'{}",
+                    source, verify
                 )),
                 outputs: std::collections::HashMap::new(),
                 failed: false,
@@ -136,24 +155,17 @@ pub async fn execute_step(
                 duration_ms: start.elapsed().as_millis() as u64,
                 backend: Some("apply".into()),
                 backends: vec!["apply".into()],
+                rendered_input: Some(format!("source={source}{verify}")),
+                ..Default::default()
             })
         }
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
-        StepType::Query => execute_query_step(step, ctx, template_ctx, team).await,
+        StepType::Query => execute_query_step(step, ctx, template_ctx, team, working_dir).await,
         StepType::Apply => execute_apply_step(step, ctx, template_ctx, working_dir).await,
         StepType::Store => execute_store_step(step, ctx, template_ctx).await,
-        StepType::Input => {
-            // Input steps require user interaction
-            Ok(StepResult {
-                output: Some("input step not yet implemented".into()),
-                outputs: std::collections::HashMap::new(),
-                failed: false,
-                error: None,
-                duration_ms: start.elapsed().as_millis() as u64,
-                backend: None,
-                backends: Vec::new(),
-            })
-        }
+        StepType::Input => Err(StepExecutionError::NotImplemented {
+            step_type: "input".into(),
+        }),
     };
 
     match &result {
@@ -208,19 +220,24 @@ async fn execute_shell_step(
     let rendered_command = ctx.template_engine.render_shell(command, template_ctx)?;
 
     // Execute command
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(&rendered_command)
+    let mut command = shell_command(&rendered_command);
+    command
         .current_dir(working_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process(&mut command);
+
+    let mut child = command
         .spawn()
         .map_err(|e| StepExecutionError::ShellFailed {
             message: format!("failed to spawn: {}", e),
             exit_code: None,
         })?;
 
-    let timeout_duration = step.timeout.map(Duration::from_millis);
+    let timeout_duration = step
+        .timeout
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(ctx.config.defaults.timeout));
 
     let map_wait_error = |err: OutputWaitError| match err {
         OutputWaitError::Read {
@@ -243,31 +260,45 @@ async fn execute_shell_step(
         },
     };
 
-    let output_result = if let Some(dur) = timeout_duration {
-        match timeout(dur, wait_for_child_output(&mut child)).await {
+    let wait = async {
+        match timeout(timeout_duration, wait_for_child_output(&mut child)).await {
             Ok(result) => result.map_err(map_wait_error),
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await; // Reap the process
-                let duration_ms = start.elapsed().as_millis() as u64;
-                if step.continue_on_error {
-                    return Ok(StepResult {
-                        output: None,
-                        outputs: std::collections::HashMap::new(),
-                        failed: true,
-                        error: Some(format!("command timed out after {:?}", dur)),
-                        duration_ms,
-                        backend: Some("shell".into()),
-                        backends: vec!["shell".into()],
-                    });
-                }
-                return Err(StepExecutionError::ShellTimeout(dur));
+            Err(_) => Err(StepExecutionError::ShellTimeout(timeout_duration)),
+        }
+    };
+
+    let output_result = if let Some(cancellation) = ctx.cancellation.as_ref() {
+        tokio::select! {
+            result = wait => result,
+            _ = cancellation.cancelled() => {
+                terminate_child_process(&mut child).await;
+                return Err(StepExecutionError::Cancelled);
             }
         }
     } else {
-        wait_for_child_output(&mut child)
-            .await
-            .map_err(map_wait_error)
+        wait.await
+    };
+
+    let output_result = match output_result {
+        Err(StepExecutionError::ShellTimeout(dur)) => {
+            terminate_child_process(&mut child).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            if step.continue_on_error {
+                return Ok(StepResult {
+                    output: None,
+                    outputs: std::collections::HashMap::new(),
+                    failed: true,
+                    error: Some(format!("command timed out after {:?}", dur)),
+                    duration_ms,
+                    backend: Some("shell".into()),
+                    backends: vec!["shell".into()],
+                    rendered_input: Some(rendered_command.clone()),
+                    ..Default::default()
+                });
+            }
+            return Err(StepExecutionError::ShellTimeout(dur));
+        }
+        other => other,
     };
 
     let (stdout, stderr, status) = output_result?;
@@ -283,6 +314,8 @@ async fn execute_shell_step(
             duration_ms,
             backend: Some("shell".into()),
             backends: vec!["shell".into()],
+            rendered_input: Some(rendered_command.clone()),
+            ..Default::default()
         })
     } else {
         let error_msg = if stderr.is_empty() {
@@ -300,6 +333,8 @@ async fn execute_shell_step(
                 duration_ms,
                 backend: Some("shell".into()),
                 backends: vec!["shell".into()],
+                rendered_input: Some(rendered_command),
+                ..Default::default()
             })
         } else {
             Err(StepExecutionError::ShellFailed {
@@ -316,6 +351,7 @@ async fn execute_query_step(
     ctx: &ExecutionContext,
     template_ctx: &TemplateContext,
     team: Option<&str>,
+    working_dir: &std::path::Path,
 ) -> Result<StepResult, StepExecutionError> {
     let role_name = step
         .role
@@ -347,22 +383,56 @@ async fn execute_query_step(
     }
 
     // Resolve role to backends
-    let resolved_role = resolve_role(role_name, team, &ctx.config)?;
+    let mut resolved_role = resolve_role(role_name, team, &ctx.config)?;
+    if step.parallel || ctx.config.defaults.parallel {
+        resolved_role.execution = RoleExecution::Parallel;
+    }
+    if let Some(min_success) = step.min_success {
+        resolved_role.min_success = min_success;
+    }
 
     // Create backend request
-    let request = BackendRequest::new(rendered_prompt);
+    let mut request =
+        BackendRequest::new(rendered_prompt.clone()).with_working_dir(working_dir.to_path_buf());
+    if let Some(timeout_ms) = step.timeout {
+        request = request.with_timeout(Duration::from_millis(timeout_ms));
+    }
+    if let Some(cancellation) = ctx.cancellation.as_ref() {
+        request = request.with_cancellation(cancellation.clone());
+    }
 
     // Execute
     let result = ctx.role_executor.execute(&resolved_role, &request).await?;
     let mut step_result = result.to_step_result();
+    step_result.rendered_input = Some(rendered_prompt);
 
     // Validate against schema if present
     if let Some(ref schema) = step.output_schema {
-        if let Some(ref output) = step_result.output {
-            if let Err(e) = validate_json_schema(output, schema) {
-                step_result.failed = true;
-                step_result.error = Some(format!("Output validation failed: {}", e));
-            }
+        let validation_errors = if step_result.outputs.is_empty() {
+            step_result
+                .output
+                .as_ref()
+                .and_then(|output| validate_json_schema(output, schema).err())
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            step_result
+                .outputs
+                .iter()
+                .filter_map(|(backend, output)| {
+                    validate_json_schema(output, schema)
+                        .err()
+                        .map(|error| format!("{backend}: {error}"))
+                })
+                .collect()
+        };
+
+        if !validation_errors.is_empty() {
+            step_result.failed = true;
+            step_result.error = Some(format!(
+                "Output validation failed: {}",
+                validation_errors.join("; ")
+            ));
         }
     }
 
@@ -515,14 +585,23 @@ async fn execute_apply_step(
         source_step: source_step.clone(),
         verify_command: step.verify.clone(),
         verify_retries: step.verify_retries,
+        // Roll back from the pre-run backups the applier takes, not `git
+        // checkout` (RollbackStrategy::Git), which restores to HEAD and so
+        // discards any uncommitted work the user had in the touched files
+        // before the run started.
         rollback_strategy: if step.rollback_on_failure {
-            RollbackStrategy::Git
+            RollbackStrategy::Backup
         } else {
             RollbackStrategy::None
         },
         timeout: None,
-        verify_timeout: Some(Duration::from_secs(300)),
+        verify_timeout: Some(
+            step.timeout
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_secs(ctx.config.defaults.timeout)),
+        ),
         retry_prompt: step.verify_retry_prompt.clone(),
+        cancellation: ctx.cancellation.clone(),
     };
 
     // Run apply (with or without verification)
@@ -537,6 +616,8 @@ async fn execute_apply_step(
             duration_ms: start.elapsed().as_millis() as u64,
             backend: Some("apply".into()),
             backends: vec!["apply".into()],
+            rendered_input: Some(format!("source={source_step}")),
+            ..Default::default()
         })
     } else {
         let result = apply_only(source_output, working_dir).await?;
@@ -552,6 +633,8 @@ async fn execute_apply_step(
             duration_ms: start.elapsed().as_millis() as u64,
             backend: Some("apply".into()),
             backends: vec!["apply".into()],
+            rendered_input: Some(format!("source={source_step}")),
+            ..Default::default()
         })
     }
 }
@@ -609,6 +692,8 @@ async fn execute_store_step(
         duration_ms: start.elapsed().as_millis() as u64,
         backend: Some("store".into()),
         backends: vec!["store".into()],
+        rendered_input: Some(rendered_data),
+        ..Default::default()
     })
 }
 
@@ -683,7 +768,7 @@ fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::E
                     from_project: from.to_string(),
                     to_project: to.to_string(),
                     relationship_type: rel_type.to_string(),
-                    metadata: evidence.map(|e| format!(r#"{{"evidence":"{}"}}"#, e)),
+                    metadata: evidence.map(|e| serde_json::json!({ "evidence": e }).to_string()),
                     created_at: String::new(),
                 };
 
@@ -887,6 +972,59 @@ mod tests {
         let result = execute_step(&step, &ctx, &template_ctx, None, dir.path()).await;
 
         assert!(matches!(result, Err(StepExecutionError::ShellTimeout(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_shell_timeout_kills_descendants() {
+        let config = Arc::new(create_test_config());
+        let ctx = ExecutionContext::new(config, false);
+        let template_ctx = TemplateContext::new();
+        let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("descendant-survived");
+
+        let step = StepConfig {
+            name: "test".into(),
+            step_type: StepType::Shell,
+            run: Some(format!("(sleep 0.2; touch {}) & wait", marker.display())),
+            timeout: Some(50),
+            ..Default::default()
+        };
+
+        let result = execute_step(&step, &ctx, &template_ctx, None, dir.path()).await;
+        assert!(matches!(result, Err(StepExecutionError::ShellTimeout(_))));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!marker.exists(), "timed-out descendant kept running");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_shell_cancellation_kills_descendants() {
+        let config = Arc::new(create_test_config());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let ctx =
+            ExecutionContext::new_with_cancellation(config, false, Some(cancellation.clone()));
+        let template_ctx = TemplateContext::new();
+        let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("cancelled-descendant-survived");
+
+        let step = StepConfig {
+            name: "test".into(),
+            step_type: StepType::Shell,
+            run: Some(format!("(sleep 0.2; touch {}) & wait", marker.display())),
+            ..Default::default()
+        };
+
+        let cancel = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancellation.cancel();
+        });
+        let result = execute_step(&step, &ctx, &template_ctx, None, dir.path()).await;
+        cancel.await.unwrap();
+
+        assert!(matches!(result, Err(StepExecutionError::Cancelled)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!marker.exists(), "cancelled descendant kept running");
     }
 
     #[cfg(unix)]

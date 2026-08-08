@@ -13,6 +13,7 @@ pub fn register_filters(env: &mut minijinja::Environment) {
     env.add_filter("default", filter_default);
     env.add_filter("trim", filter_trim);
     env.add_filter("lines", filter_lines);
+    env.add_filter("truncate_chars", filter_truncate_chars);
     env.add_filter("strftime", filter_strftime);
 }
 
@@ -41,12 +42,16 @@ pub fn shell_escape_str(s: &str) -> String {
 
 /// Shell-escape a minijinja Value (used by auto-escape formatter).
 pub fn shell_escape_value(_state: &State, value: Value) -> Result<Value, Error> {
-    Ok(Value::from(shell_escape_str(&value.to_string())))
+    Ok(Value::from_safe_string(shell_escape_str(
+        &value.to_string(),
+    )))
 }
 
 /// Filter: escape a string for safe shell interpolation.
 fn filter_shell_escape(_state: &State, value: Value) -> Result<Value, Error> {
-    Ok(Value::from(shell_escape_str(&value.to_string())))
+    Ok(Value::from_safe_string(shell_escape_str(
+        &value.to_string(),
+    )))
 }
 
 /// Serialize value to JSON string
@@ -132,6 +137,17 @@ fn filter_lines(_state: &State, value: Value) -> Result<Value, Error> {
     let s = value.to_string();
     let lines: Vec<Value> = s.lines().map(|l| Value::from(l.to_string())).collect();
     Ok(Value::from_iter(lines))
+}
+
+/// Truncate a string at a Unicode character boundary.
+fn filter_truncate_chars(_state: &State, value: Value, limit: usize) -> Result<Value, Error> {
+    let value = value.to_string();
+    if value.chars().count() <= limit {
+        return Ok(Value::from(value));
+    }
+    let mut truncated = value.chars().take(limit).collect::<String>();
+    truncated.push_str("\n[truncated]");
+    Ok(Value::from(truncated))
 }
 
 /// Format a timestamp using strftime format string
@@ -328,6 +344,15 @@ mod tests {
             minijinja::context! { value => "line1\nline2\nline3" },
         );
         assert_eq!(result, "line1");
+    }
+
+    #[test]
+    fn test_truncate_chars_filter_preserves_unicode_boundaries() {
+        let result = render(
+            "{{ value | truncate_chars(3) }}",
+            minijinja::context! { value => "a🦀bcdef" },
+        );
+        assert_eq!(result, "a🦀b\n[truncated]");
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub struct BackendConfig {
     /// Model name (for API backends like Ollama)
     pub model: Option<String>,
 
+    /// Input price in USD per million tokens, used for run estimates
+    pub input_cost_per_million: Option<f64>,
+
+    /// Output price in USD per million tokens, used for run estimates
+    pub output_cost_per_million: Option<f64>,
+
     /// API key (for HTTP backends)
     pub api_key: Option<String>,
 
@@ -86,6 +92,8 @@ impl Default for BackendConfig {
             enabled: true,
             timeout: default_timeout(),
             model: None,
+            input_cost_per_million: None,
+            output_cost_per_million: None,
             api_key: None,
             api_key_env: None,
             backend_type: None,
@@ -99,6 +107,12 @@ impl Default for BackendConfig {
 }
 
 impl BackendConfig {
+    pub(crate) fn apply_default_timeout(&mut self, timeout: u64) {
+        if self.timeout == default_timeout() {
+            self.timeout = timeout;
+        }
+    }
+
     /// Returns true if this is the Claude API backend
     pub fn is_claude_api(&self) -> bool {
         self.backend_type.as_deref() == Some("claude-api")

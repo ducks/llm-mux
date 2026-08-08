@@ -2,9 +2,11 @@
 
 //! CLI-based backend executor
 
-use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse};
+use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, TokenUsage};
 use crate::config::BackendConfig;
-use crate::process::exit_status_code;
+use crate::process::{
+    MAX_CAPTURE_BYTES, configure_child_process, exit_status_code, terminate_child_process,
+};
 use async_trait::async_trait;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -99,6 +101,74 @@ impl CliBackend {
 
         cmd
     }
+
+    fn parse_json_output(&self, stdout: &str) -> Option<(String, serde_json::Value)> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+            let text = extract_response_text(&value).unwrap_or_else(|| stdout.to_string());
+            return Some((text, value));
+        }
+
+        let events = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+
+        let text = events
+            .iter()
+            .filter_map(extract_response_text)
+            .next_back()?;
+        Some((text, serde_json::Value::Array(events)))
+    }
+}
+
+fn extract_response_text(value: &serde_json::Value) -> Option<String> {
+    for field in ["result", "response", "text", "output"] {
+        if let Some(text) = value.get(field).and_then(|value| value.as_str()) {
+            return Some(text.to_string());
+        }
+    }
+
+    let item = value.get("item")?;
+    if item.get("type").and_then(|value| value.as_str()) == Some("agent_message") {
+        return item
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+    }
+
+    None
+}
+
+fn extract_token_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = match value {
+        serde_json::Value::Array(events) => events
+            .iter()
+            .rev()
+            .find_map(|event| event.get("usage").or_else(|| event.pointer("/turn/usage")))?,
+        value => value.get("usage")?,
+    };
+    let read = |names: &[&str]| {
+        names.iter().find_map(|name| {
+            usage
+                .get(*name)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+        })
+    };
+    let prompt_tokens = read(&["input_tokens", "prompt_tokens"]);
+    let completion_tokens = read(&["output_tokens", "completion_tokens"]);
+    let total_tokens = read(&["total_tokens"]).or_else(|| {
+        prompt_tokens
+            .zip(completion_tokens)
+            .map(|(input, output)| input + output)
+    });
+    Some(TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
 }
 
 #[async_trait]
@@ -108,6 +178,7 @@ impl BackendExecutor for CliBackend {
         let timeout = request.timeout.unwrap_or(self.timeout);
 
         let mut cmd = self.build_command(request);
+        configure_child_process(&mut cmd);
 
         // Set working directory if specified
         if let Some(ref dir) = request.working_dir {
@@ -136,9 +207,11 @@ impl BackendExecutor for CliBackend {
 
         let mut stdout_lines = Vec::new();
         let mut stderr_lines = Vec::new();
+        let mut stdout_bytes = 0usize;
+        let mut stderr_bytes = 0usize;
 
         // Read output with timeout
-        let result = tokio::time::timeout(timeout, async {
+        let execution = async {
             let mut stdout_done = false;
             let mut stderr_done = false;
             while !stdout_done || !stderr_done {
@@ -147,6 +220,10 @@ impl BackendExecutor for CliBackend {
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(l)) => {
+                                stdout_bytes = stdout_bytes.saturating_add(l.len() + 1);
+                                if stdout_bytes > MAX_CAPTURE_BYTES {
+                                    return Err(BackendError::parse("stdout exceeded 16 MiB capture limit"));
+                                }
                                 tracing::trace!(backend = %self.name, line = %l.chars().take(50).collect::<String>(), "stdout");
                                 stdout_lines.push(l);
                             }
@@ -160,6 +237,10 @@ impl BackendExecutor for CliBackend {
                     line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(l)) => {
+                                stderr_bytes = stderr_bytes.saturating_add(l.len() + 1);
+                                if stderr_bytes > MAX_CAPTURE_BYTES {
+                                    return Err(BackendError::parse("stderr exceeded 16 MiB capture limit"));
+                                }
                                 tracing::trace!(backend = %self.name, line = %l.chars().take(50).collect::<String>(), "stderr");
                                 stderr_lines.push(l);
                             }
@@ -174,33 +255,46 @@ impl BackendExecutor for CliBackend {
             }
 
             // Wait for process to complete
-            let status = child.wait().await.map_err(|e| {
-                BackendError::Unavailable {
-                    message: format!("failed to wait for process: {}", e),
-                }
+            let status = child.wait().await.map_err(|e| BackendError::Unavailable {
+                message: format!("failed to wait for process: {}", e),
             })?;
 
             Ok(status)
-        })
-        .await;
+        };
+
+        let result = if let Some(cancellation) = request.cancellation.as_ref() {
+            tokio::select! {
+                result = tokio::time::timeout(timeout, execution) => Some(result),
+                _ = cancellation.cancelled() => None,
+            }
+        } else {
+            Some(tokio::time::timeout(timeout, execution).await)
+        };
 
         let elapsed = start.elapsed();
 
         match result {
-            Ok(Ok(status)) => {
+            Some(Ok(Ok(status))) => {
                 let stdout_text = stdout_lines.join("\n");
                 let stderr_text = stderr_lines.join("\n");
 
                 if status.success() {
-                    let mut response =
-                        BackendResponse::new(stdout_text.clone(), self.name.clone(), elapsed);
-
-                    // Try to parse JSON if this is a JSON-output backend
-                    if self.json_output {
-                        if let Ok(json) = serde_json::from_str(&stdout_text) {
-                            response = response.with_structured(json);
+                    let response = if self.json_output {
+                        if let Some((text, structured)) = self.parse_json_output(&stdout_text) {
+                            let usage = extract_token_usage(&structured);
+                            let mut response =
+                                BackendResponse::new(text, self.name.clone(), elapsed)
+                                    .with_structured(structured);
+                            if let Some(usage) = usage {
+                                response = response.with_usage(usage);
+                            }
+                            response
+                        } else {
+                            BackendResponse::new(stdout_text.clone(), self.name.clone(), elapsed)
                         }
-                    }
+                    } else {
+                        BackendResponse::new(stdout_text.clone(), self.name.clone(), elapsed)
+                    };
 
                     Ok(response)
                 } else {
@@ -211,22 +305,24 @@ impl BackendExecutor for CliBackend {
                     ))
                 }
             }
-            Ok(Err(e)) => {
+            Some(Ok(Err(e))) => {
                 // Kill and reap child to prevent zombie process
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                terminate_child_process(&mut child).await;
                 Err(e)
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 // Timeout - kill the process
-                let _ = child.kill().await;
-                let _ = child.wait().await; // Reap the process
+                terminate_child_process(&mut child).await;
                 let partial = if stdout_lines.is_empty() {
                     None
                 } else {
                     Some(stdout_lines.join("\n"))
                 };
                 Err(BackendError::timeout(elapsed, partial))
+            }
+            None => {
+                terminate_child_process(&mut child).await;
+                Err(BackendError::Cancelled)
             }
         }
     }
@@ -237,7 +333,8 @@ impl BackendExecutor for CliBackend {
 
     async fn is_available(&self) -> bool {
         // Check if command exists
-        tokio::process::Command::new("which")
+        let locator = if cfg!(windows) { "where" } else { "which" };
+        tokio::process::Command::new(locator)
             .arg(&self.command)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -260,6 +357,17 @@ mod tests {
         let response = backend.execute(&request).await.unwrap();
         assert_eq!(response.text.trim(), "Hello, World!");
         assert_eq!(response.backend, "echo");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cli_backend_uses_request_working_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend = CliBackend::new("pwd", "sh").with_args(vec!["-c".into(), "pwd".into()]);
+        let request = BackendRequest::new("ignored").with_working_dir(dir.path().to_path_buf());
+
+        let response = backend.execute(&request).await.unwrap();
+        assert_eq!(response.text.trim(), dir.path().to_string_lossy());
     }
 
     #[tokio::test]
@@ -311,6 +419,35 @@ mod tests {
         let response = backend.execute(&request).await.unwrap();
         // Should have attempted JSON parsing
         assert!(response.structured.is_some() || response.text.contains("key"));
+    }
+
+    #[test]
+    fn test_codex_jsonl_extracts_final_agent_message() {
+        let backend = CliBackend::new("codex", "codex").with_args(vec!["--json".into()]);
+        let output = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}\n"
+        );
+
+        let (text, structured) = backend.parse_json_output(output).unwrap();
+        assert_eq!(text, "final answer");
+        assert_eq!(structured.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_codex_jsonl_extracts_token_usage() {
+        let structured = serde_json::json!([
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {"type": "turn.completed", "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4
+            }}
+        ]);
+        let usage = extract_token_usage(&structured).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(4));
+        assert_eq!(usage.total_tokens, Some(14));
     }
 
     #[tokio::test]

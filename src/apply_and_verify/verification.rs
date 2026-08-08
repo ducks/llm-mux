@@ -1,11 +1,13 @@
 //! Verification command execution
 
-use crate::process::{OutputStream, OutputWaitError, exit_status_code, wait_for_child_output};
+use crate::process::{
+    OutputStream, OutputWaitError, configure_child_process, exit_status_code, shell_command,
+    terminate_child_process, wait_for_child_output,
+};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Errors during verification
@@ -26,6 +28,9 @@ pub enum VerifyError {
         source: std::io::Error,
         exit_code: Option<i32>,
     },
+
+    #[error("verification cancelled")]
+    Cancelled,
 }
 
 /// Result of running a verification command
@@ -93,16 +98,26 @@ pub async fn run_verify(
     working_dir: &Path,
     timeout_duration: Option<Duration>,
 ) -> Result<VerifyResult, VerifyError> {
+    run_verify_cancellable(command, working_dir, timeout_duration, None).await
+}
+
+/// Run a verification command with optional workflow cancellation.
+pub async fn run_verify_cancellable(
+    command: &str,
+    working_dir: &Path,
+    timeout_duration: Option<Duration>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<VerifyResult, VerifyError> {
     let start = Instant::now();
 
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut command_process = shell_command(command);
+    command_process
         .current_dir(working_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(VerifyError::SpawnFailed)?;
+        .stderr(Stdio::piped());
+    configure_child_process(&mut command_process);
+
+    let mut child = command_process.spawn().map_err(VerifyError::SpawnFailed)?;
 
     let map_wait_error = |err: OutputWaitError| match err {
         OutputWaitError::Read {
@@ -124,20 +139,37 @@ pub async fn run_verify(
     };
 
     // Wrap in timeout if specified
-    let result = if let Some(dur) = timeout_duration {
-        match timeout(dur, wait_for_child_output(&mut child)).await {
-            Ok(r) => r.map_err(map_wait_error),
-            Err(_) => {
-                // Kill the process on timeout
-                let _ = child.kill().await;
-                let _ = child.wait().await; // Reap the process
-                return Err(VerifyError::Timeout(dur));
+    let wait = async {
+        if let Some(dur) = timeout_duration {
+            match timeout(dur, wait_for_child_output(&mut child)).await {
+                Ok(result) => result.map_err(map_wait_error),
+                Err(_) => Err(VerifyError::Timeout(dur)),
+            }
+        } else {
+            wait_for_child_output(&mut child)
+                .await
+                .map_err(map_wait_error)
+        }
+    };
+
+    let result = if let Some(cancellation) = cancellation {
+        tokio::select! {
+            result = wait => result,
+            _ = cancellation.cancelled() => {
+                terminate_child_process(&mut child).await;
+                return Err(VerifyError::Cancelled);
             }
         }
     } else {
-        wait_for_child_output(&mut child)
-            .await
-            .map_err(map_wait_error)
+        wait.await
+    };
+
+    let result = match result {
+        Err(VerifyError::Timeout(duration)) => {
+            terminate_child_process(&mut child).await;
+            return Err(VerifyError::Timeout(duration));
+        }
+        other => other,
     };
 
     let duration = start.elapsed();
