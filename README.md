@@ -44,6 +44,9 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
 - **Works anywhere** - single binary, no runtime dependencies, runs in CI
 
+llm-mux grew out of [lok](https://github.com/ducks/lok), an earlier take on the
+same idea. Lok is no longer developed; this is where the work continues.
+
 ## Install
 
 ```bash
