@@ -1,8 +1,8 @@
 //! Diff application with fuzzy matching and backup creation
 
 use super::edit_parser::{DiffHunk, DiffLine, EditOperation, normalize_whitespace};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -90,9 +90,8 @@ impl DiffApplier {
     ///    the join.
     /// 2. **`..` traversal** — any `ParentDir` component can climb out.
     ///    Rejected lexically, before touching the filesystem.
-    /// 3. **Symlink escape** — a path (or a parent directory) that is a symlink
-    ///    pointing outside the tree. Caught by canonicalizing the deepest
-    ///    existing ancestor and confirming it stays under the canonical root.
+    /// 3. **Symlink escape** — a path (or a parent directory) that is a symlink.
+    ///    Every existing component is inspected without following links.
     ///
     /// Returns the joined (non-canonical) path to use for the actual I/O, so
     /// callers keep operating on paths relative to `working_dir` as before.
@@ -112,37 +111,50 @@ impl DiffApplier {
             }
         }
 
-        let joined = self.working_dir.join(path);
-
-        // (3): canonicalize the deepest ancestor that exists on disk (the full
-        // path may not exist yet for a create) and require it to stay under the
-        // canonical working-dir root. This resolves symlinks in the prefix.
-        let root = self
-            .working_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.working_dir.clone());
-
-        let mut ancestor = joined.as_path();
-        let real_ancestor = loop {
-            if let Ok(real) = ancestor.canonicalize() {
-                break real;
+        // Inspect each existing component with symlink_metadata so dangling
+        // links are visible too. Once a component does not exist, no deeper
+        // component can exist without its parent, so the walk can stop.
+        let mut current = self.working_dir.clone();
+        for component in path.components() {
+            if let Component::Normal(name) = component {
+                current.push(name);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(ApplyError::PathEscape {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(error) => {
+                        return Err(ApplyError::ReadError {
+                            path: current,
+                            source: error,
+                        });
+                    }
+                }
             }
-            match ancestor.parent() {
-                Some(parent) => ancestor = parent,
-                // Walked past the root without finding an existing ancestor;
-                // fall back to the lexically-cleaned join under root, which the
-                // component check above already proved cannot climb out.
-                None => return Ok(joined),
-            }
-        };
-
-        if real_ancestor.starts_with(&root) {
-            Ok(joined)
-        } else {
-            Err(ApplyError::PathEscape {
-                path: path.to_path_buf(),
-            })
         }
+
+        Ok(self.working_dir.join(path))
+    }
+
+    /// Create a file without following a final-component symlink or replacing
+    /// a file that appeared after path validation.
+    fn write_new_file(&self, path: &Path, content: &str) -> Result<(), ApplyError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|source| ApplyError::WriteError {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        file.write_all(content.as_bytes())
+            .map_err(|source| ApplyError::WriteError {
+                path: path.to_path_buf(),
+                source,
+            })
     }
 
     /// Apply all edit operations
@@ -180,10 +192,10 @@ impl DiffApplier {
                         // Track the file before writing so a partial write is
                         // removed if this operation fails.
                         created_files.push(full_path.clone());
-                        fs::write(&full_path, new).map_err(|e| ApplyError::WriteError {
-                            path: full_path.clone(),
-                            source: e,
-                        })
+                        // Recheck after creating parents, then use create_new so
+                        // a dangling link or file raced into place is refused.
+                        let full_path = self.resolve_path(path)?;
+                        self.write_new_file(&full_path, new)
                     } else {
                         let backup = self.create_backup(&full_path)?;
                         modified_files.push(ModifiedFile {
@@ -195,7 +207,8 @@ impl DiffApplier {
                 }
                 EditOperation::FullFile { path, content } => {
                     let full_path = self.resolve_path(path)?;
-                    if full_path.exists() {
+                    let is_new = !full_path.exists();
+                    if !is_new {
                         let backup = self.create_backup(&full_path)?;
                         modified_files.push(ModifiedFile {
                             path: full_path.clone(),
@@ -211,10 +224,15 @@ impl DiffApplier {
                         }
                         created_files.push(full_path.clone());
                     }
-                    fs::write(&full_path, content).map_err(|e| ApplyError::WriteError {
-                        path: full_path,
-                        source: e,
-                    })
+                    if is_new {
+                        let full_path = self.resolve_path(path)?;
+                        self.write_new_file(&full_path, content)
+                    } else {
+                        fs::write(&full_path, content).map_err(|e| ApplyError::WriteError {
+                            path: full_path,
+                            source: e,
+                        })
+                    }
                 }
             })();
 
@@ -812,6 +830,33 @@ mod tests {
             !outside.join("pwned.txt").exists(),
             "symlinked parent escaped confinement"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rejects_dangling_symlink_create_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("project");
+        fs::create_dir_all(&work).unwrap();
+        let outside = root.path().join("outside.txt");
+
+        // The target does not exist, so Path::exists returns false for the
+        // symlink itself. symlink_metadata must still identify and reject it.
+        symlink(&outside, work.join("notes.local")).unwrap();
+
+        let applier = DiffApplier::new(&work);
+        let edits = vec![EditOperation::FullFile {
+            path: PathBuf::from("notes.local"),
+            content: "pwned".to_string(),
+        }];
+
+        assert!(matches!(
+            applier.apply(&edits),
+            Err(ApplyError::PathEscape { .. })
+        ));
+        assert!(!outside.exists(), "dangling symlink escaped confinement");
     }
 
     #[test]
