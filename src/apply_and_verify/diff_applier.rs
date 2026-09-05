@@ -150,11 +150,17 @@ impl DiffApplier {
                 path: path.to_path_buf(),
                 source,
             })?;
-        file.write_all(content.as_bytes())
-            .map_err(|source| ApplyError::WriteError {
+        if let Err(source) = file.write_all(content.as_bytes()) {
+            // create_new proved this operation created the file. Remove a
+            // partial write here rather than making the caller guess whether
+            // the path existed before the attempt.
+            let _ = fs::remove_file(path);
+            return Err(ApplyError::WriteError {
                 path: path.to_path_buf(),
                 source,
-            })
+            });
+        }
+        Ok(())
     }
 
     /// Apply all edit operations
@@ -181,21 +187,32 @@ impl DiffApplier {
                 }
                 EditOperation::OldNewPair { path, old, new } => {
                     let full_path = self.resolve_path(path)?;
-                    // Empty old means create new file
+                    // Empty old means replace the full file when it exists, or
+                    // create it when it does not. Existing content must be
+                    // backed up so rollback never deletes user data.
                     if old.is_empty() {
-                        if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent).map_err(|e| ApplyError::WriteError {
-                                path: parent.to_path_buf(),
-                                source: e,
-                            })?;
+                        if full_path.exists() {
+                            let backup = self.create_backup(&full_path)?;
+                            modified_files.push(ModifiedFile {
+                                path: full_path.clone(),
+                                backup_path: backup,
+                            });
+                            fs::write(&full_path, new).map_err(|source| ApplyError::WriteError {
+                                path: full_path,
+                                source,
+                            })
+                        } else {
+                            if let Some(parent) = full_path.parent() {
+                                fs::create_dir_all(parent).map_err(|e| ApplyError::WriteError {
+                                    path: parent.to_path_buf(),
+                                    source: e,
+                                })?;
+                            }
+                            let full_path = self.resolve_path(path)?;
+                            self.write_new_file(&full_path, new)?;
+                            created_files.push(full_path);
+                            Ok(())
                         }
-                        // Track the file before writing so a partial write is
-                        // removed if this operation fails.
-                        created_files.push(full_path.clone());
-                        // Recheck after creating parents, then use create_new so
-                        // a dangling link or file raced into place is refused.
-                        let full_path = self.resolve_path(path)?;
-                        self.write_new_file(&full_path, new)
                     } else {
                         let backup = self.create_backup(&full_path)?;
                         modified_files.push(ModifiedFile {
@@ -222,11 +239,12 @@ impl DiffApplier {
                                 source: e,
                             })?;
                         }
-                        created_files.push(full_path.clone());
                     }
                     if is_new {
                         let full_path = self.resolve_path(path)?;
-                        self.write_new_file(&full_path, content)
+                        self.write_new_file(&full_path, content)?;
+                        created_files.push(full_path);
+                        Ok(())
                     } else {
                         fs::write(&full_path, content).map_err(|e| ApplyError::WriteError {
                             path: full_path,
@@ -613,6 +631,53 @@ mod tests {
 
         let content = fs::read_to_string(dir.path().join("subdir/new_file.rs")).unwrap();
         assert_eq!(content, "fn new_function() {}");
+    }
+
+    #[test]
+    fn test_empty_old_replaces_existing_file_with_backup() {
+        let dir = TempDir::new().unwrap();
+        setup_test_file(dir.path(), "existing.rs", "user content");
+        let applier = DiffApplier::new(dir.path());
+        let edits = vec![EditOperation::OldNewPair {
+            path: PathBuf::from("existing.rs"),
+            old: String::new(),
+            new: "replacement".into(),
+        }];
+
+        let result = applier.apply(&edits).unwrap();
+
+        assert_eq!(result.modified_files.len(), 1);
+        assert!(result.created_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(&result.modified_files[0].backup_path).unwrap(),
+            "user content"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("existing.rs")).unwrap(),
+            "replacement"
+        );
+    }
+
+    #[test]
+    fn test_empty_old_batch_failure_restores_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = setup_test_file(dir.path(), "existing.rs", "user content");
+        let applier = DiffApplier::new(dir.path());
+        let edits = vec![
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: String::new(),
+                new: "replacement".into(),
+            },
+            EditOperation::OldNewPair {
+                path: PathBuf::from("existing.rs"),
+                old: "missing".into(),
+                new: "never written".into(),
+            },
+        ];
+
+        assert!(applier.apply(&edits).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "user content");
     }
 
     #[test]

@@ -23,8 +23,8 @@ pub enum ApplyVerifyError {
     #[error("rollback failed: {0}")]
     RollbackError(#[from] RollbackError),
 
-    #[error("verification failed after {attempts} attempts")]
-    MaxRetriesExceeded { attempts: u32 },
+    #[error("verification failed after {attempts} attempts: {last_output}")]
+    MaxRetriesExceeded { attempts: u32, last_output: String },
 
     #[error("apply-verify cycle timed out after {0:?}")]
     Timeout(Duration),
@@ -216,7 +216,7 @@ pub async fn apply_and_verify(
     }
 
     // All attempts failed
-    let _last_error = attempts
+    let last_output = attempts
         .last()
         .and_then(|a| a.verify_result.as_ref())
         .map(|r| r.combined_output())
@@ -224,6 +224,7 @@ pub async fn apply_and_verify(
 
     Err(ApplyVerifyError::MaxRetriesExceeded {
         attempts: max_attempts,
+        last_output,
     })
 }
 
@@ -315,7 +316,7 @@ mod tests {
 
         let config = ApplyVerifyConfig {
             source_step: "test".into(),
-            verify_command: Some("false".into()), // Always fails
+            verify_command: Some("echo expected-verification-failure >&2; false".into()),
             verify_retries: 0,
             rollback_strategy: RollbackStrategy::Backup,
             ..Default::default()
@@ -323,10 +324,12 @@ mod tests {
 
         let result = apply_and_verify(source_output, &config, dir.path()).await;
 
+        let error = result.unwrap_err();
         assert!(matches!(
-            result,
-            Err(ApplyVerifyError::MaxRetriesExceeded { .. })
+            &error,
+            ApplyVerifyError::MaxRetriesExceeded { .. }
         ));
+        assert!(error.to_string().contains("expected-verification-failure"));
 
         // File should be rolled back
         let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
