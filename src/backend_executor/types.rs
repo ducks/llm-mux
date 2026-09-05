@@ -295,6 +295,15 @@ pub struct RetryPolicy {
 
     /// Whether to add jitter to delays
     pub jitter: bool,
+
+    /// Overall time budget shared by all attempts and backoff sleeps
+    pub total_timeout: Duration,
+
+    /// Whether provider rate limits may be retried
+    pub retry_rate_limit: bool,
+
+    /// Whether timed-out attempts may be retried
+    pub retry_timeout: bool,
 }
 
 impl Default for RetryPolicy {
@@ -305,6 +314,9 @@ impl Default for RetryPolicy {
             max_delay: Duration::from_secs(60),
             backoff_multiplier: 2.0,
             jitter: true,
+            total_timeout: Duration::from_secs(300),
+            retry_rate_limit: true,
+            retry_timeout: false,
         }
     }
 }
@@ -315,7 +327,20 @@ impl RetryPolicy {
         Self {
             max_retries: config.max_retries,
             initial_delay: Duration::from_millis(config.retry_delay),
+            total_timeout: Duration::from_secs(config.timeout),
+            retry_rate_limit: config.retry_rate_limit,
+            retry_timeout: config.retry_timeout,
             ..Default::default()
+        }
+    }
+
+    /// Whether this policy permits retrying a classified backend error.
+    pub fn allows_retry(&self, error: &BackendError) -> bool {
+        match error {
+            BackendError::Timeout { .. } => self.retry_timeout,
+            BackendError::RateLimit { .. } => self.retry_rate_limit,
+            BackendError::Network { .. } => true,
+            _ => false,
         }
     }
 
@@ -412,5 +437,21 @@ mod tests {
         let delay = policy.delay_for_attempt(0);
         assert!(delay >= Duration::from_secs(1));
         assert!(delay <= Duration::from_millis(1250)); // 1s + 25% jitter
+    }
+
+    #[test]
+    fn test_retry_policy_honors_backend_flags() {
+        let config = BackendConfig {
+            timeout: 42,
+            retry_rate_limit: false,
+            retry_timeout: true,
+            ..Default::default()
+        };
+        let policy = RetryPolicy::from_config(&config);
+
+        assert_eq!(policy.total_timeout, Duration::from_secs(42));
+        assert!(!policy.allows_retry(&BackendError::rate_limit(None)));
+        assert!(policy.allows_retry(&BackendError::timeout(Duration::from_secs(1), None)));
+        assert!(policy.allows_retry(&BackendError::network("reset")));
     }
 }
