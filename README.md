@@ -76,7 +76,7 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Route to multiple models at once** - run a role across Claude + Gemini in parallel, get both responses
 - **Chain steps together** - shell commands, LLM queries, file edits, and verification steps compose naturally
 - **Apply and verify** - LLM suggests edits, llm-mux applies them, runs your test suite, rolls back on failure
-- **Dry-run first** - `--dry-run` shows what shell and apply steps would do before touching anything
+- **Dry-run first** - `--dry-run` renders every step without commands, provider requests, or persistent writes
 - **Inspect and resume runs** - prompts, outputs, provider usage, and failures are kept in a durable SQLite ledger
 - **Works anywhere** - single binary with direct HTTP support; CLI backends use their corresponding installed tools
 
