@@ -17,7 +17,7 @@
 //! let config = Arc::new(LlmuxConfig::load(None)?);
 //! let runner = WorkflowRunner::new(config.clone());
 //!
-//! let workflow = load_workflow("review", None)?;
+//! let workflow = load_workflow("review", None, false)?;
 //! let result = runner.run(workflow, args, Path::new("."), None).await?;
 //!
 //! if result.success {
