@@ -101,7 +101,10 @@ async fn rollback_git(
     };
 
     // Restore modified files
-    for file in modified_files {
+    // A file can be edited more than once in one batch. Restore the newest
+    // backup first so the oldest backup, containing the original user state,
+    // is applied last.
+    for file in modified_files.iter().rev() {
         let relative_path = file.path.strip_prefix(working_dir).unwrap_or(&file.path);
 
         let output = Command::new("git")
@@ -128,7 +131,7 @@ async fn rollback_git(
     }
 
     // Remove created files
-    for path in created_files {
+    for path in created_files.iter().rev() {
         match fs::remove_file(path) {
             Ok(_) => {
                 result.restored.push(path.clone());
@@ -160,7 +163,9 @@ async fn rollback_backup(
     };
 
     // Restore from backups
-    for file in modified_files {
+    // Restore repeated edits newest-to-oldest so the original pre-run backup
+    // is the final state written to disk.
+    for file in modified_files.iter().rev() {
         if !file.backup_path.exists() {
             result.failed.push((
                 file.path.clone(),
@@ -260,6 +265,28 @@ mod tests {
 
         let content = fs::read_to_string(&original_path).unwrap();
         assert_eq!(content, "original content");
+    }
+
+    #[tokio::test]
+    async fn test_rollback_backup_restores_repeated_edits_in_reverse_order() {
+        let dir = TempDir::new().unwrap();
+        let path = setup_test_file(dir.path(), "test.rs", "second edit");
+        let original_backup = setup_test_file(dir.path(), "original.bak", "original");
+        let first_edit_backup = setup_test_file(dir.path(), "first-edit.bak", "first edit");
+        let modified = vec![
+            ModifiedFile {
+                path: path.clone(),
+                backup_path: original_backup,
+            },
+            ModifiedFile {
+                path: path.clone(),
+                backup_path: first_edit_backup,
+            },
+        ];
+
+        rollback_backup(&modified, &[]).await.unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "original");
     }
 
     #[tokio::test]
