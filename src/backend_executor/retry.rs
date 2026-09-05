@@ -3,6 +3,7 @@
 use super::types::{BackendError, BackendExecutor, BackendRequest, BackendResponse, RetryPolicy};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::time::Instant;
 
 /// Wrapper that adds retry logic to any backend executor
 pub struct RetryExecutor<T: BackendExecutor> {
@@ -30,28 +31,67 @@ impl<T: BackendExecutor> RetryExecutor<T> {
 impl<T: BackendExecutor + 'static> BackendExecutor for RetryExecutor<T> {
     async fn execute(&self, request: &BackendRequest) -> Result<BackendResponse, BackendError> {
         let mut last_error = None;
+        let total_timeout = request.timeout.unwrap_or(self.policy.total_timeout);
+        let started = Instant::now();
+        let deadline = started + total_timeout;
 
         for attempt in 0..=self.policy.max_retries {
-            match self.inner.execute(request).await {
+            if request
+                .cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return Err(BackendError::Cancelled);
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(BackendError::timeout(started.elapsed(), None));
+            }
+            let mut attempt_request = request.clone();
+            attempt_request.timeout = Some(remaining);
+            let execution = async {
+                if let Some(cancellation) = attempt_request.cancellation.as_ref() {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => Err(BackendError::Cancelled),
+                        result = self.inner.execute(&attempt_request) => result,
+                    }
+                } else {
+                    self.inner.execute(&attempt_request).await
+                }
+            };
+            let result = match tokio::time::timeout_at(deadline, execution).await {
+                Ok(result) => result,
+                Err(_) => Err(BackendError::timeout(started.elapsed(), None)),
+            };
+
+            match result {
                 Ok(response) => return Ok(response),
                 Err(e) => {
-                    // Check if error is retryable
-                    if !e.is_retryable() || attempt == self.policy.max_retries {
+                    if !self.policy.allows_retry(&e) || attempt == self.policy.max_retries {
                         return Err(e);
                     }
 
-                    // Calculate delay
                     let delay = if let Some(retry_after) = e.retry_after() {
-                        // Use server-specified retry-after if available
-                        retry_after
+                        retry_after.min(self.policy.max_delay)
                     } else {
                         self.policy.delay_for_attempt(attempt)
                     };
 
                     last_error = Some(e);
 
-                    // Wait before retrying
-                    tokio::time::sleep(delay).await;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if delay >= remaining {
+                        return Err(BackendError::timeout(started.elapsed(), None));
+                    }
+                    if let Some(cancellation) = request.cancellation.as_ref() {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(BackendError::Cancelled),
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
         }
@@ -94,7 +134,7 @@ mod tests {
     /// Mock backend that fails a specified number of times before succeeding
     struct MockBackend {
         name: String,
-        fail_count: AtomicU32,
+        fail_count: Arc<AtomicU32>,
         fail_times: u32,
         error: BackendError,
     }
@@ -103,7 +143,7 @@ mod tests {
         fn new(fail_times: u32, error: BackendError) -> Self {
             Self {
                 name: "mock".into(),
-                fail_count: AtomicU32::new(0),
+                fail_count: Arc::new(AtomicU32::new(0)),
                 fail_times,
                 error,
             }
@@ -189,6 +229,115 @@ mod tests {
         let result = executor.execute(&BackendRequest::new("test")).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), BackendError::Auth { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_timeout_and_rate_limit_flags_control_retries() {
+        let timeout_backend =
+            MockBackend::new(1, BackendError::timeout(Duration::from_millis(1), None));
+        let timeout_attempts = timeout_backend.fail_count.clone();
+        let timeout_executor = RetryExecutor::new(
+            timeout_backend,
+            RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(1),
+                jitter: false,
+                retry_timeout: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            timeout_executor
+                .execute(&BackendRequest::new("test"))
+                .await
+                .is_err()
+        );
+        assert_eq!(timeout_attempts.load(Ordering::SeqCst), 1);
+
+        let rate_backend = MockBackend::retryable(1);
+        let rate_attempts = rate_backend.fail_count.clone();
+        let rate_executor = RetryExecutor::new(
+            rate_backend,
+            RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(1),
+                jitter: false,
+                retry_rate_limit: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            rate_executor
+                .execute(&BackendRequest::new("test"))
+                .await
+                .is_err()
+        );
+        assert_eq!(rate_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retry_backoff_observes_cancellation() {
+        let backend = MockBackend::new(
+            u32::MAX,
+            BackendError::rate_limit(Some(Duration::from_secs(5))),
+        );
+        let executor = RetryExecutor::new(
+            backend,
+            RetryPolicy {
+                total_timeout: Duration::from_secs(10),
+                max_delay: Duration::from_secs(5),
+                ..Default::default()
+            },
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let request = BackendRequest::new("test").with_cancellation(cancellation.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancellation.cancel();
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(200), executor.execute(&request))
+            .await
+            .expect("cancellation should interrupt retry backoff");
+        assert!(matches!(result, Err(BackendError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_retry_budget_caps_all_attempts_and_backoff() {
+        let backend = MockBackend::new(u32::MAX, BackendError::network("reset"));
+        let executor = RetryExecutor::new(
+            backend,
+            RetryPolicy {
+                max_retries: 10,
+                initial_delay: Duration::from_millis(50),
+                total_timeout: Duration::from_millis(10),
+                jitter: false,
+                ..Default::default()
+            },
+        );
+
+        let started = Instant::now();
+        let result = executor.execute(&BackendRequest::new("test")).await;
+        assert!(matches!(result, Err(BackendError::Timeout { .. })));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_is_capped() {
+        let backend = MockBackend::new(1, BackendError::rate_limit(Some(Duration::from_secs(60))));
+        let executor = RetryExecutor::new(
+            backend,
+            RetryPolicy {
+                max_delay: Duration::from_millis(5),
+                total_timeout: Duration::from_secs(1),
+                jitter: false,
+                ..Default::default()
+            },
+        );
+
+        let started = Instant::now();
+        assert!(executor.execute(&BackendRequest::new("test")).await.is_ok());
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[tokio::test]
