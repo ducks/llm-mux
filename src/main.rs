@@ -54,13 +54,17 @@ struct Cli {
     #[arg(long, global = true)]
     quiet: bool,
 
-    /// Trust the project's `.llm-mux/config.toml` to define backend commands.
+    /// Trust project config to define backend execution and credential fields.
     ///
-    /// By default a project config cannot set a backend's `command`/`args` or
-    /// `command_wrapper` (those run as processes, so a hostile repo could run
-    /// arbitrary code). Pass this only in repos you trust.
+    /// By default project config cannot set backend commands, environment,
+    /// kind, credentials, or command wrappers. Pass this only in repos you
+    /// trust.
     #[arg(long, global = true)]
     allow_project_backends: bool,
+
+    /// Trust project-local workflows to execute shell and apply steps.
+    #[arg(long, global = true)]
+    allow_project_workflows: bool,
 }
 
 #[derive(Subcommand)]
@@ -228,6 +232,7 @@ async fn main() -> Result<()> {
                 &*handler,
                 cli.output_file.as_deref(),
                 dry_run,
+                cli.allow_project_workflows,
                 cancel_token.clone(),
             )
             .await
@@ -249,8 +254,15 @@ async fn main() -> Result<()> {
                 }
             },
             RunCommands::Resume { id, dry_run } => {
-                match commands::resume_run(id, dry_run, trust, &*handler, cancel_token.clone())
-                    .await
+                match commands::resume_run(
+                    id,
+                    dry_run,
+                    trust,
+                    cli.allow_project_workflows,
+                    &*handler,
+                    cancel_token.clone(),
+                )
+                .await
                 {
                     Ok(code) => code,
                     Err(error) => {
@@ -262,7 +274,12 @@ async fn main() -> Result<()> {
         },
 
         Commands::Validate { workflow } => {
-            match commands::validate_workflow(&workflow, Some(&working_dir), &*handler) {
+            match commands::validate_workflow(
+                &workflow,
+                Some(&working_dir),
+                cli.allow_project_workflows,
+                &*handler,
+            ) {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("Error: {}", e);
@@ -360,5 +377,12 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn parses_project_workflow_trust_flag() {
+        let cli =
+            Cli::try_parse_from(["llmux", "--allow-project-workflows", "run", "review"]).unwrap();
+        assert!(cli.allow_project_workflows);
     }
 }

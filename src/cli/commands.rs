@@ -135,10 +135,11 @@ pub async fn run_workflow(
     handler: &dyn OutputHandler,
     output_file: Option<&Path>,
     dry_run: bool,
+    allow_project_workflows: bool,
     cancellation: CancellationToken,
 ) -> Result<i32, String> {
     // Load workflow
-    let workflow = load_workflow(workflow_name, Some(working_dir))
+    let workflow = load_workflow(workflow_name, Some(working_dir), allow_project_workflows)
         .map_err(|e| format!("Failed to load workflow '{}': {}", workflow_name, e))?;
 
     // Parse workflow args (simple key=value for now)
@@ -336,6 +337,7 @@ pub async fn resume_run(
     previous_run_id: i64,
     dry_run: bool,
     trust: ProjectTrust,
+    allow_project_workflows: bool,
     handler: &dyn OutputHandler,
     cancellation: CancellationToken,
 ) -> Result<i32, String> {
@@ -347,8 +349,12 @@ pub async fn resume_run(
         .get_run(previous_run_id)
         .map_err(|error| format!("Failed to load run {previous_run_id}: {error}"))?
         .ok_or_else(|| format!("Run {previous_run_id} not found"))?;
-    let workflow = load_workflow(&previous.workflow_name, Some(&previous.working_dir))
-        .map_err(|error| format!("Failed to reload workflow: {error}"))?;
+    let workflow = load_workflow(
+        &previous.workflow_name,
+        Some(&previous.working_dir),
+        allow_project_workflows,
+    )
+    .map_err(|error| format!("Failed to reload workflow: {error}"))?;
     let config = Arc::new(
         LlmuxConfig::load_with_trust(Some(&previous.working_dir), trust)
             .map_err(|error| format!("Failed to reload configuration: {error}"))?,
@@ -461,9 +467,10 @@ fn resolve_workflow_args(
 pub fn validate_workflow(
     workflow_name: &str,
     working_dir: Option<&Path>,
+    allow_project_workflows: bool,
     handler: &dyn OutputHandler,
 ) -> Result<i32, String> {
-    match load_workflow(workflow_name, working_dir) {
+    match load_workflow(workflow_name, working_dir, allow_project_workflows) {
         Ok(wf) => {
             // Run validation
             match wf.validate() {

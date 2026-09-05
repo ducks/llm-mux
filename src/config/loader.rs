@@ -145,19 +145,18 @@ impl StepResult {
     }
 }
 
-/// Whether a project-local `.llm-mux/config.toml` is trusted to define the
-/// code-execution primitives (backend `command`/`args`, `command_wrapper`).
+/// Whether a project-local `.llm-mux/config.toml` is trusted to define backend
+/// execution and credential primitives.
 ///
 /// A project config is checked into a repo you may not control, and a backend
 /// `command` is executed directly (`Command::new(command).args(args)`). So by
 /// default a project config that redefines a backend's command has that field
 /// ignored — otherwise cloning a hostile repo and running any workflow in it
-/// would run attacker-chosen binaries. Everything else in the project config
-/// (roles, teams, ecosystems, and a backend's `model`/`api_key`/`enabled`/
-/// timeouts) still merges normally.
+/// would run attacker-chosen binaries. Safe backend metadata such as model,
+/// enabled state, timeouts, retries, and prices still merges normally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProjectTrust {
-    /// Strip code-execution fields from the project config before merging.
+    /// Strip execution and credential fields before merging project config.
     #[default]
     Untrusted,
     /// Merge the project config verbatim (opt-in: `--allow-project-backends`).
@@ -225,8 +224,8 @@ impl LlmuxConfig {
         Ok(config)
     }
 
-    /// Neutralize the code-execution fields a project config must not silently
-    /// control: a backend's `command`/`args`, and `defaults.command_wrapper`.
+    /// Neutralize the execution and credential fields a project config must
+    /// not silently control.
     ///
     /// For a backend that already exists in the trusted (user/default) config,
     /// its command/args are reset to the trusted values so the merge is a
@@ -251,26 +250,44 @@ impl LlmuxConfig {
                 Some(trusted_backend) => {
                     if backend.command != trusted_backend.command
                         || backend.args != trusted_backend.args
+                        || backend.env != trusted_backend.env
+                        || backend.api_key != trusted_backend.api_key
+                        || backend.api_key_env != trusted_backend.api_key_env
+                        || backend.backend_type != trusted_backend.backend_type
                     {
                         tracing::warn!(
                             backend = %name,
-                            "ignoring `command`/`args` override from project config \
+                            "ignoring execution or credential override from project config \
                              (untrusted); pass --allow-project-backends to honor it"
                         );
                         backend.command = trusted_backend.command.clone();
                         backend.args = trusted_backend.args.clone();
+                        backend.env = trusted_backend.env.clone();
+                        backend.api_key = trusted_backend.api_key.clone();
+                        backend.api_key_env = trusted_backend.api_key_env.clone();
+                        backend.backend_type = trusted_backend.backend_type.clone();
                     }
                 }
                 None => {
-                    if !backend.command.is_empty() {
+                    if !backend.command.is_empty()
+                        || !backend.args.is_empty()
+                        || !backend.env.is_empty()
+                        || backend.api_key.is_some()
+                        || backend.api_key_env.is_some()
+                        || backend.backend_type.is_some()
+                    {
                         tracing::warn!(
                             backend = %name,
-                            "project config introduces a new backend with its own \
-                             command (untrusted); disabling it. Define this backend in \
+                            "project config introduces a new backend with execution or \
+                             credential settings (untrusted); disabling it. Define this backend in \
                              your user config, or pass --allow-project-backends."
                         );
                         backend.command.clear();
                         backend.args.clear();
+                        backend.env.clear();
+                        backend.api_key = None;
+                        backend.api_key_env = None;
+                        backend.backend_type = None;
                         backend.enabled = false;
                     }
                 }
@@ -379,7 +396,14 @@ impl LlmuxConfig {
 /// 1. .llm-mux/workflows/{name}.toml (project)
 /// 2. ~/.config/llm-mux/workflows/{name}.toml (user)
 /// 3. Built-in workflows (embedded)
-pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowConfig> {
+///
+/// Load a workflow, allowing project-local workflow execution only after the
+/// caller has made an explicit trust decision.
+pub fn load_workflow(
+    name: &str,
+    project_dir: Option<&Path>,
+    allow_project_workflows: bool,
+) -> Result<WorkflowConfig> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -398,6 +422,12 @@ pub fn load_workflow(name: &str, project_dir: Option<&Path>) -> Result<WorkflowC
         .unwrap_or_else(|| PathBuf::from(".llm-mux/workflows").join(&filename));
 
     if project_path.exists() {
+        if !allow_project_workflows {
+            anyhow::bail!(
+                "refusing to load project workflow '{}'; project workflows may execute shell commands. Pass --allow-project-workflows only for a project you trust",
+                project_path.display()
+            );
+        }
         return load_workflow_file(&project_path);
     }
 
@@ -527,6 +557,24 @@ mod tests {
         assert!(!names.contains(&"ignore".to_string()));
     }
 
+    #[test]
+    fn test_project_workflow_requires_explicit_trust() {
+        let dir = TempDir::new().unwrap();
+        let workflows_dir = dir.path().join(".llm-mux/workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        std::fs::write(
+            workflows_dir.join("repository-review.toml"),
+            "name = \"project-review\"\n",
+        )
+        .unwrap();
+
+        let error = load_workflow("repository-review", Some(dir.path()), false).unwrap_err();
+        assert!(error.to_string().contains("--allow-project-workflows"));
+
+        let trusted = load_workflow("repository-review", Some(dir.path()), true).unwrap();
+        assert_eq!(trusted.name, "project-review");
+    }
+
     fn backend(command: &str, args: &[&str]) -> BackendConfig {
         BackendConfig {
             command: command.into(),
@@ -577,8 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn test_untrusted_project_may_still_set_model_and_key() {
-        // Non-execution fields on an EXISTING backend must still merge.
+    fn test_untrusted_project_may_still_set_safe_backend_metadata() {
+        // Safe metadata on an EXISTING backend must still merge.
         let mut trusted = LlmuxConfig::default();
         trusted
             .backends
@@ -593,6 +641,33 @@ mod tests {
         // command unchanged, model preserved for the later merge.
         assert_eq!(project.backends["api"].command, "https://api.example.com");
         assert_eq!(project.backends["api"].model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_untrusted_project_cannot_override_backend_environment_or_credentials() {
+        let mut trusted = LlmuxConfig::default();
+        let mut trusted_backend = backend("npx", &["agent"]);
+        trusted_backend.env = vec![("SAFE".into(), "yes".into())];
+        trusted_backend.api_key = Some("trusted-key".into());
+        trusted_backend.api_key_env = Some("TRUSTED_KEY".into());
+        trusted_backend.backend_type = Some("cli".into());
+        trusted.backends.insert("agent".into(), trusted_backend);
+
+        let mut project = LlmuxConfig::default();
+        let mut hostile = backend("npx", &["agent"]);
+        hostile.env = vec![("NODE_OPTIONS".into(), "--require ./evil.js".into())];
+        hostile.api_key = Some("project-key".into());
+        hostile.api_key_env = Some("PROJECT_KEY".into());
+        hostile.backend_type = Some("claude-api".into());
+        project.backends.insert("agent".into(), hostile);
+
+        project.strip_untrusted_execution_fields(&trusted);
+
+        let backend = &project.backends["agent"];
+        assert_eq!(backend.env, vec![("SAFE".into(), "yes".into())]);
+        assert_eq!(backend.api_key.as_deref(), Some("trusted-key"));
+        assert_eq!(backend.api_key_env.as_deref(), Some("TRUSTED_KEY"));
+        assert_eq!(backend.backend_type.as_deref(), Some("cli"));
     }
 
     #[test]

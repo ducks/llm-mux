@@ -42,7 +42,7 @@ depends_on = ["synthesize"]
 ```
 
 ```bash
-llm-mux run review
+llm-mux --allow-project-workflows run review
 ```
 
 No SDK. No Python. No boilerplate. A single Rust binary, a config file, done.
@@ -146,7 +146,9 @@ execution.
 
 ### 3. Create a workflow
 
-Workflows live in `.llm-mux/workflows/` (project) or `~/.config/llm-mux/workflows/` (global):
+Workflows live in `.llm-mux/workflows/` (project) or `~/.config/llm-mux/workflows/` (global).
+Project workflows can execute shell commands, so running or validating one
+requires the explicit `--allow-project-workflows` trust flag:
 
 ```toml
 name = "review"
@@ -172,8 +174,8 @@ depends_on = ["diff"]
 ### 4. Run
 
 ```bash
-llm-mux run review
-llm-mux run review --dry-run    # preview without executing
+llm-mux --allow-project-workflows run review
+llm-mux --allow-project-workflows run review --dry-run
 ```
 
 ## Workflow Steps
@@ -328,6 +330,8 @@ Global options:
   --team <name>      Override auto-detected team
   --output <mode>    console | json | quiet
   --debug            Enable debug output
+  --allow-project-backends   Trust project backend execution/credential fields
+  --allow-project-workflows  Trust project workflows to execute commands
 ```
 
 ## Examples
