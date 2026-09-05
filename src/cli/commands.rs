@@ -154,7 +154,7 @@ pub async fn run_workflow(
 
     if dry_run {
         handler.emit(OutputEvent::Info {
-            message: "[dry-run] shell and apply steps will be skipped".into(),
+            message: "[dry-run] all side effects and provider requests will be skipped".into(),
         });
     }
 

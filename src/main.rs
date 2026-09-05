@@ -74,7 +74,7 @@ enum Commands {
         /// Workflow name
         workflow: String,
 
-        /// Preview what the workflow would do without executing shell or apply steps
+        /// Preview the workflow without side effects or provider requests
         #[arg(long)]
         dry_run: bool,
 
@@ -149,7 +149,7 @@ enum RunCommands {
         /// Numeric run ID
         id: i64,
 
-        /// Preview remaining shell and apply steps without executing them
+        /// Preview remaining steps without side effects or provider requests
         #[arg(long)]
         dry_run: bool,
     },

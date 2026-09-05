@@ -159,6 +159,54 @@ pub async fn execute_step(
                 ..Default::default()
             })
         }
+        StepType::Query if ctx.dry_run => {
+            let role = step
+                .role
+                .as_deref()
+                .ok_or_else(|| StepExecutionError::MissingField {
+                    step: step.name.clone(),
+                    field: "role".into(),
+                })?;
+            let rendered = render_query_prompt(step, ctx, template_ctx)?;
+            Ok(StepResult {
+                output: Some(format!("[dry-run] would query role '{role}'")),
+                failed: false,
+                duration_ms: start.elapsed().as_millis() as u64,
+                backend: Some("dry-run".into()),
+                backends: vec!["dry-run".into()],
+                rendered_input: Some(rendered),
+                ..Default::default()
+            })
+        }
+        StepType::Store if ctx.dry_run => {
+            let input = step
+                .prompt
+                .as_ref()
+                .ok_or_else(|| StepExecutionError::MissingField {
+                    step: step.name.clone(),
+                    field: "prompt".into(),
+                })?;
+            let rendered = ctx.template_engine.render(input, template_ctx)?;
+            let ecosystem = template_ctx
+                .ecosystem
+                .as_ref()
+                .map(|ecosystem| ecosystem.name.as_str())
+                .ok_or_else(|| StepExecutionError::MissingField {
+                    step: step.name.clone(),
+                    field: "ecosystem".into(),
+                })?;
+            Ok(StepResult {
+                output: Some(format!(
+                    "[dry-run] would store rendered data in ecosystem '{ecosystem}'"
+                )),
+                failed: false,
+                duration_ms: start.elapsed().as_millis() as u64,
+                backend: Some("dry-run".into()),
+                backends: vec!["dry-run".into()],
+                rendered_input: Some(rendered),
+                ..Default::default()
+            })
+        }
         StepType::Shell => execute_shell_step(step, ctx, template_ctx, working_dir).await,
         StepType::Query => execute_query_step(step, ctx, template_ctx, team, working_dir).await,
         StepType::Apply => execute_apply_step(step, ctx, template_ctx, working_dir).await,
@@ -361,26 +409,7 @@ async fn execute_query_step(
             field: "role".into(),
         })?;
 
-    let prompt = step
-        .prompt
-        .as_ref()
-        .ok_or_else(|| StepExecutionError::MissingField {
-            step: step.name.clone(),
-            field: "prompt".into(),
-        })?;
-
-    // Render prompt template
-    let mut rendered_prompt = ctx.template_engine.render(prompt, template_ctx)?;
-
-    // If output_schema is present, append JSON formatting instructions
-    if let Some(ref schema) = step.output_schema {
-        let schema_json = serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_string());
-
-        rendered_prompt.push_str(&format!(
-            "\n\nIMPORTANT: You MUST respond with valid JSON matching this schema:\n```json\n{}\n```\n\nDo not include any text before or after the JSON object.",
-            schema_json
-        ));
-    }
+    let rendered_prompt = render_query_prompt(step, ctx, template_ctx)?;
 
     // Resolve role to backends
     let mut resolved_role = resolve_role(role_name, team, &ctx.config)?;
@@ -437,6 +466,31 @@ async fn execute_query_step(
     }
 
     Ok(step_result)
+}
+
+fn render_query_prompt(
+    step: &StepConfig,
+    ctx: &ExecutionContext,
+    template_ctx: &TemplateContext,
+) -> Result<String, StepExecutionError> {
+    let prompt = step
+        .prompt
+        .as_ref()
+        .ok_or_else(|| StepExecutionError::MissingField {
+            step: step.name.clone(),
+            field: "prompt".into(),
+        })?;
+    let mut rendered = ctx.template_engine.render(prompt, template_ctx)?;
+
+    if let Some(ref schema) = step.output_schema {
+        let schema_json = serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_string());
+        rendered.push_str(&format!(
+            "\n\nIMPORTANT: You MUST respond with valid JSON matching this schema:\n```json\n{}\n```\n\nDo not include any text before or after the JSON object.",
+            schema_json
+        ));
+    }
+
+    Ok(rendered)
 }
 
 /// Strip markdown code fences from output if present
@@ -854,7 +908,9 @@ fn store_json_data(ecosystem: &str, json_data: &str) -> Result<String, anyhow::E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BackendConfig, RoleConfig, RoleExecution, StepConfig, StepType};
+    use crate::config::{
+        BackendConfig, EcosystemConfig, RoleConfig, RoleExecution, StepConfig, StepType,
+    };
 
     use tempfile::TempDir;
 
@@ -1144,5 +1200,57 @@ mod tests {
         // Using echo backend, should get prompt back
         assert!(!result.failed);
         assert!(result.output.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_query_renders_prompt_without_calling_backend() {
+        let mut config = create_test_config();
+        config.backends.get_mut("echo").unwrap().command = "/definitely/not-a-backend".into();
+        let ctx = ExecutionContext::new(Arc::new(config), true);
+        let mut template_ctx = TemplateContext::new();
+        template_ctx
+            .args
+            .insert("subject".into(), "the patch".into());
+        let dir = TempDir::new().unwrap();
+        let step = StepConfig {
+            name: "review".into(),
+            step_type: StepType::Query,
+            role: Some("test".into()),
+            prompt: Some("Review {{ args.subject }}".into()),
+            ..Default::default()
+        };
+
+        let result = execute_step(&step, &ctx, &template_ctx, None, dir.path())
+            .await
+            .unwrap();
+
+        assert!(!result.failed);
+        assert_eq!(result.backend.as_deref(), Some("dry-run"));
+        assert_eq!(result.rendered_input.as_deref(), Some("Review the patch"));
+        assert!(result.output.unwrap().contains("would query role 'test'"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_store_renders_data_without_opening_database() {
+        let ctx = ExecutionContext::new(Arc::new(create_test_config()), true);
+        let mut template_ctx = TemplateContext::new();
+        template_ctx.set_ecosystem("dry-run-test", EcosystemConfig::default(), None);
+        template_ctx.args.insert("value".into(), "not-json".into());
+        let dir = TempDir::new().unwrap();
+        let step = StepConfig {
+            name: "remember".into(),
+            step_type: StepType::Store,
+            prompt: Some("{{ args.value }}".into()),
+            ..Default::default()
+        };
+
+        let result = execute_step(&step, &ctx, &template_ctx, None, dir.path())
+            .await
+            .unwrap();
+
+        assert!(!result.failed);
+        assert_eq!(result.backend.as_deref(), Some("dry-run"));
+        assert_eq!(result.rendered_input.as_deref(), Some("not-json"));
+        assert!(result.output.unwrap().contains("dry-run-test"));
     }
 }
