@@ -80,6 +80,9 @@ You have API keys for Claude, Gemini, and a local Ollama instance. Right now you
 - **Inspect and resume runs** - prompts, outputs, provider usage, and failures are kept in a durable SQLite ledger
 - **Works anywhere** - single binary with direct HTTP support; CLI backends use their corresponding installed tools
 
+llm-mux grew out of [lok](https://github.com/ducks/lok), an earlier take on the
+same idea. Lok is no longer developed; this is where the work continues.
+
 ## Install
 
 ```bash
